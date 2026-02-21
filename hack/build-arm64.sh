@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
-# build-arm64.sh - Build talosctl for arm64 and run tests
+# build-arm64.sh - Build Talos Linux OS binaries for arm64 from an x86_64 host
 #
-# This script builds the talosctl binary for arm64 from an x86_64 host.
-# It handles the Go 1.26.0 toolchain requirement by building from source
-# when the required Go version is not available.
+# Builds the full set of Talos Linux OS components for arm64:
+#   - machined  : the main OS daemon (manages everything on the node)
+#   - init      : PID 1, responsible for early boot and spawning machined
+#   - apid      : the gRPC API daemon
+#   - installer : installs Talos onto a disk
+#   - trustd    : PKI/mTLS trust service
+#   - maintenance, storaged, dashboard: supporting OS daemons
+#   - talosctl  : the CLI management tool (client-side only, not the OS itself)
+#
+# Note: building the full OS image (kernel + initramfs + container image) requires
+# Docker buildx + ghcr.io/siderolabs/tools image which contains the Linux kernel
+# and C libraries. This script covers the Go-compiled OS components.
 #
 # Usage: ./hack/build-arm64.sh [--test]
 #   --test    Also run unit tests after building
@@ -18,7 +27,7 @@ OUT_DIR="${PROJECT_ROOT}/_out"
 REQUIRED_GO_VERSION="1.26.0"
 GO_BIN=""
 
-echo "==> Building talosctl for arm64"
+echo "==> Building Talos Linux OS components for arm64"
 echo "    Project: ${PROJECT_ROOT}"
 echo "    Output:  ${OUT_DIR}"
 
@@ -97,37 +106,61 @@ GOROOT="$(dirname "$(dirname "${GO_BIN}")")"
     "${GO_BIN}" mod download 2>&1 | grep -E "^go: (downloading|error)" || true
 )
 
-# Build talosctl for arm64
-echo "==> Cross-compiling talosctl for linux/arm64..."
+# Build all Talos Linux OS components + talosctl for arm64
 GOROOT="$(dirname "$(dirname "${GO_BIN}")")"
-(
-    cd "${PROJECT_ROOT}"
-    GOROOT="${GOROOT}" \
-    GOWORK=off \
-    GOOS=linux \
-    GOARCH=arm64 \
-    CGO_ENABLED=0 \
-    GOPROXY=off \
-    GONOSUMDB="*" \
-    "${GO_BIN}" build \
-        -tags "grpcnotrace" \
-        -ldflags "-s -w" \
-        -o "${OUT_DIR}/talosctl-linux-arm64" \
-        ./cmd/talosctl
+
+# Map of output-name -> source-package
+declare -A COMPONENTS=(
+    ["machined-linux-arm64"]="./internal/app/machined"
+    ["init-linux-arm64"]="./internal/app/init"
+    ["apid-linux-arm64"]="./internal/app/apid"
+    ["installer-linux-arm64"]="./cmd/installer"
+    ["trustd-linux-arm64"]="./internal/app/trustd"
+    ["maintenance-linux-arm64"]="./internal/app/maintenance"
+    ["storaged-linux-arm64"]="./internal/app/storaged"
+    ["dashboard-linux-arm64"]="./internal/app/dashboard"
+    ["talosctl-linux-arm64"]="./cmd/talosctl"
 )
 
-echo "==> Build successful!"
-ls -lh "${OUT_DIR}/talosctl-linux-arm64"
-file "${OUT_DIR}/talosctl-linux-arm64"
+echo "==> Cross-compiling Talos Linux OS components for linux/arm64..."
+for binary in "${!COMPONENTS[@]}"; do
+    pkg="${COMPONENTS[$binary]}"
+    printf "    %-32s" "${binary}..."
+    (
+        cd "${PROJECT_ROOT}"
+        GOROOT="${GOROOT}" \
+        GOWORK=off \
+        GOOS=linux \
+        GOARCH=arm64 \
+        CGO_ENABLED=0 \
+        GOPROXY=off \
+        GONOSUMDB="*" \
+        "${GO_BIN}" build \
+            -tags "grpcnotrace" \
+            -ldflags "-s -w" \
+            -o "${OUT_DIR}/${binary}" \
+            "${pkg}"
+    )
+    echo "OK ($(ls -sh "${OUT_DIR}/${binary}" | awk '{print $1}'))"
+done
 
-# Test the binary using QEMU if available
+echo ""
+echo "==> Build successful! All arm64 Talos OS binaries:"
+ls -lh "${OUT_DIR}"/*-linux-arm64
+
+# Test binaries using QEMU if available
 if command -v qemu-aarch64-static &>/dev/null; then
     echo ""
-    echo "==> Testing arm64 binary with QEMU..."
+    echo "==> Testing arm64 binaries with QEMU..."
+    echo "--- talosctl version ---"
     qemu-aarch64-static "${OUT_DIR}/talosctl-linux-arm64" version --short 2>&1 || true
+    echo "--- installer help ---"
+    qemu-aarch64-static "${OUT_DIR}/installer-linux-arm64" --help 2>&1 | head -5 || true
+    echo "--- machined (early startup, exits without Talos env) ---"
+    timeout 2 qemu-aarch64-static "${OUT_DIR}/machined-linux-arm64" 2>&1 | head -3 || true
 else
     echo ""
-    echo "NOTE: qemu-aarch64-static not found. To test the arm64 binary:"
+    echo "NOTE: qemu-aarch64-static not found. To test the arm64 binaries:"
     echo "      apt-get install -y qemu-user-static"
     echo "      qemu-aarch64-static ${OUT_DIR}/talosctl-linux-arm64 version --short"
 fi

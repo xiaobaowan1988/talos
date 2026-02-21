@@ -44,7 +44,12 @@ LDFLAGS := -nostdlib -T linker.ld
 
 # ── Sources → objects ─────────────────────────────────────────────────────
 SRCS_S  := boot/entry.S
-SRCS_C  := drivers/uart.c init/main.c
+SRCS_C  := drivers/uart.c \
+           mm/memblock.c  \
+           mm/mmu.c       \
+           mm/page_alloc.c \
+           mm/slab.c      \
+           init/main.c
 
 OBJS    := $(SRCS_S:.S=.o) $(SRCS_C:.c=.o)
 
@@ -112,3 +117,4 @@ syms: kernel.elf
 # ── Clean ─────────────────────────────────────────────────────────────────
 clean:
 	rm -f $(OBJS) kernel.elf
+	rm -f mm/*.o

@@ -3,26 +3,28 @@
 # Phase 2 构建系统
 #
 # 用法：
-#   make            — 编译内核 ELF
-#   make run        — 在 QEMU 中运行
+#   make            — 编译内核 ELF（自动选择工具链）
+#   make run        — 在 QEMU 中运行（交互，Ctrl-A X 退出）
+#   make test       — 编译并在 QEMU 中运行验证（带超时，适合 CI）
 #   make disasm     — 反汇编（查看向量表地址等）
 #   make clean      — 清理构建产物
 #
-# 依赖：
-#   - aarch64-linux-gnu-gcc（交叉编译工具链）
-#   - qemu-system-aarch64（运行验证）
+# 工具链选择（自动检测，也可手动指定）：
+#   make                          — 自动检测（优先 GCC，回退 LLVM）
+#   make LLVM=1                   — 强制使用 LLVM/Clang
+#   make CROSS_COMPILE=aarch64-none-elf-  — 指定 GCC 前缀
 
 # ---- 交叉编译工具链 ----
 #
-# 支持两种工具链：
-#   1. GCC 交叉编译器（默认）：
-#        CROSS_COMPILE=aarch64-linux-gnu- make
-#   2. LLVM/Clang（系统无 GCC 交叉编译器时使用）：
-#        make LLVM=1
+# 优先级：
+#   1. LLVM=1 显式指定 → 使用 clang -target aarch64-linux-gnu + ld.lld
+#   2. CROSS_COMPILE 显式指定 → 使用指定的 GCC 工具链
+#   3. 自动检测：若 aarch64-linux-gnu-gcc 存在则用 GCC，否则回退到 LLVM
 #
-# LLVM=1 时使用 clang -target aarch64-linux-gnu + ld.lld
-#
-LLVM            ?= 0
+CROSS_COMPILE   ?= aarch64-linux-gnu-
+
+# 自动检测：若未设置 LLVM 且 GCC 交叉编译器不存在，自动切换到 LLVM
+LLVM            ?= $(shell command -v $(CROSS_COMPILE)gcc >/dev/null 2>&1 && echo 0 || echo 1)
 
 ifeq ($(LLVM),1)
 CC              := clang -target aarch64-linux-gnu
@@ -31,7 +33,6 @@ OBJCOPY         := llvm-objcopy
 OBJDUMP         := llvm-objdump
 READELF         := llvm-readelf
 else
-CROSS_COMPILE   ?= aarch64-linux-gnu-
 CC              := $(CROSS_COMPILE)gcc
 LD              := $(CROSS_COMPILE)ld
 OBJCOPY         := $(CROSS_COMPILE)objcopy
@@ -158,6 +159,36 @@ run: $(TARGET)
 	    -kernel $(TARGET) \
 	    -nographic
 
+# ---- 自动化测试（带超时，适合 CI / 快速验证）----
+#
+# 运行 QEMU 最多 QEMU_TIMEOUT 秒后强制终止。
+# 检查输出中是否包含 Phase 2 的预期结尾行：
+#   "Phase 2 complete"         — 全部阶段通过
+#   "memory fully reclaimed"   — Buddy 分配/释放/合并正确
+#
+# 用法：
+#   make test          — 编译 + 运行验证（超时 15 秒）
+#   make test QEMU_TIMEOUT=30  — 调整超时时间
+#
+QEMU_TIMEOUT    ?= 15
+
+.PHONY: test
+test: $(TARGET)
+	@echo "=== Running Phase 2 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@timeout $(QEMU_TIMEOUT) qemu-system-aarch64 \
+	    -M virt \
+	    -cpu cortex-a72 \
+	    -m 1G \
+	    -kernel $(TARGET) \
+	    -nographic \
+	    -no-reboot 2>&1 | tee /tmp/arm64os_test.log; true
+	@echo ""
+	@echo "--- Test results ---"
+	@grep -q "Phase 2 complete"        /tmp/arm64os_test.log && echo "PASS: Phase 2 complete"        || echo "FAIL: 'Phase 2 complete' not found"
+	@grep -q "memory fully reclaimed"  /tmp/arm64os_test.log && echo "PASS: Buddy alloc/free/merge"  || echo "FAIL: 'memory fully reclaimed' not found"
+	@grep -q "MMU enabled"             /tmp/arm64os_test.log && echo "PASS: MMU enabled"             || echo "FAIL: 'MMU enabled' not found"
+	@echo "--------------------"
+
 # ---- 带 GDB 调试的运行 ----
 #
 # 另开终端：aarch64-linux-gnu-gdb arm64os.elf
@@ -204,15 +235,21 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"
-	@echo "  run       — Run in QEMU (Ctrl-A X to exit)"
+	@echo "  run       — Run in QEMU interactively (Ctrl-A X to exit)"
+	@echo "  test      — Build + run in QEMU with timeout, check output (CI)"
 	@echo "  debug     — Run in QEMU with GDB stub (port 1234)"
 	@echo "  disasm    — Disassemble the kernel ELF"
 	@echo "  sections  — Show ELF section headers"
 	@echo "  syms      — Show symbol table (sorted by address)"
 	@echo "  clean     — Remove build artifacts"
 	@echo ""
-	@echo "Variables:"
-	@echo "  CROSS_COMPILE — Toolchain prefix (default: aarch64-linux-gnu-)"
+	@echo "Toolchain (auto-detected; override with variables):"
+	@echo "  LLVM=1              — Force LLVM/Clang toolchain"
+	@echo "  CROSS_COMPILE=...   — Override GCC prefix (default: aarch64-linux-gnu-)"
+	@echo "  QEMU_TIMEOUT=N      — Timeout in seconds for 'make test' (default: 15)"
 	@echo ""
-	@echo "Example:"
-	@echo "  make CROSS_COMPILE=aarch64-none-elf-"
+	@echo "Examples:"
+	@echo "  make                          — auto-detect toolchain, build"
+	@echo "  make test                     — build + QEMU verification"
+	@echo "  make LLVM=1 test              — force clang, verify"
+	@echo "  make CROSS_COMPILE=aarch64-none-elf- run"

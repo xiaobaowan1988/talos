@@ -1,4 +1,0 @@
-machine:
-  time:
-    servers:
-      - /dev/ptp0

@@ -1,8 +1,0 @@
-apiVersion: v1alpha1
-kind: ExtensionServiceConfig
-name: foo
-configFiles:
-    - content: hello
-      mountPath: /etc/foo
-environment:
-    - FOO=BAR

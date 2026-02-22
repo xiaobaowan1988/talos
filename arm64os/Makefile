@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 2 构建系统
+# Phase 3 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -95,6 +95,10 @@ OBJS := \
     mm/memblock.o \
     mm/page_alloc.o \
     kernel/printk.o \
+    kernel/irq/irqdesc.o \
+    kernel/irq/handle.o \
+    drivers/irqchip/gic-v3.o \
+    drivers/timer/arm_arch_timer.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -129,6 +133,18 @@ arch/arm64/mm/%.o: arch/arm64/mm/%.c
 
 # Phase 2: mm/ C 文件
 mm/%.o: mm/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 3: kernel/irq/ C 文件
+kernel/irq/%.o: kernel/irq/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 3: drivers/irqchip/ C 文件
+drivers/irqchip/%.o: drivers/irqchip/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 3: drivers/timer/ C 文件
+drivers/timer/%.o: drivers/timer/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---- 编译 C 文件 ----
@@ -174,7 +190,7 @@ QEMU_TIMEOUT    ?= 15
 
 .PHONY: test
 test: $(TARGET)
-	@echo "=== Running Phase 2 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@echo "=== Running Phase 3 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) qemu-system-aarch64 \
 	    -M virt \
 	    -cpu cortex-a72 \
@@ -184,9 +200,12 @@ test: $(TARGET)
 	    -no-reboot 2>&1 | tee /tmp/arm64os_test.log; true
 	@echo ""
 	@echo "--- Test results ---"
-	@grep -q "Phase 2 complete"        /tmp/arm64os_test.log && echo "PASS: Phase 2 complete"        || echo "FAIL: 'Phase 2 complete' not found"
-	@grep -q "memory fully reclaimed"  /tmp/arm64os_test.log && echo "PASS: Buddy alloc/free/merge"  || echo "FAIL: 'memory fully reclaimed' not found"
 	@grep -q "MMU enabled"             /tmp/arm64os_test.log && echo "PASS: MMU enabled"             || echo "FAIL: 'MMU enabled' not found"
+	@grep -q "memory fully reclaimed"  /tmp/arm64os_test.log && echo "PASS: Buddy alloc/free/merge"  || echo "FAIL: 'memory fully reclaimed' not found"
+	@grep -q "GIC v3 initialized"      /tmp/arm64os_test.log && echo "PASS: GIC v3 initialized"      || echo "FAIL: 'GIC v3 initialized' not found"
+	@grep -q "arch timer started"      /tmp/arm64os_test.log && echo "PASS: arch timer started"      || echo "FAIL: 'arch timer started' not found"
+	@grep -q "Timer ticks: OK"         /tmp/arm64os_test.log && echo "PASS: Timer ticks received"    || echo "FAIL: 'Timer ticks: OK' not found"
+	@grep -q "Phase 3 complete"        /tmp/arm64os_test.log && echo "PASS: Phase 3 complete"        || echo "FAIL: 'Phase 3 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -226,12 +245,13 @@ syms: $(TARGET)
 .PHONY: clean
 clean:
 	rm -f $(OBJS) $(TARGET) $(BINARY)
+	find . -name '*.o' -delete 2>/dev/null || true
 	@echo "Clean done."
 
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 2 Build System"
+	@echo "arm64os Phase 3 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

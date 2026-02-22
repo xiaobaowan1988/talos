@@ -169,7 +169,7 @@ $(BINARY): $(TARGET)
 .PHONY: run
 run: $(TARGET)
 	qemu-system-aarch64 \
-	    -M virt \
+	    -M virt,gic-version=3 \
 	    -cpu cortex-a72 \
 	    -m 1G \
 	    -kernel $(TARGET) \
@@ -192,7 +192,7 @@ QEMU_TIMEOUT    ?= 15
 test: $(TARGET)
 	@echo "=== Running Phase 3 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) qemu-system-aarch64 \
-	    -M virt \
+	    -M virt,gic-version=3 \
 	    -cpu cortex-a72 \
 	    -m 1G \
 	    -kernel $(TARGET) \
@@ -218,7 +218,7 @@ test: $(TARGET)
 .PHONY: debug
 debug: $(TARGET)
 	qemu-system-aarch64 \
-	    -M virt \
+	    -M virt,gic-version=3 \
 	    -cpu cortex-a72 \
 	    -m 1G \
 	    -kernel $(TARGET) \

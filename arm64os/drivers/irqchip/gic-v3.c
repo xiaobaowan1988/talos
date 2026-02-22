@@ -51,9 +51,11 @@ static inline void writeq(u64 val, volatile void *addr)
  * ============================================================ */
 #define GICD_CTLR           0x0000U /* 分发器控制 */
 #define GICD_TYPER          0x0004U /* 类型寄存器（中断数量等）*/
+#define GICD_IGROUPR        0x0080U /* 中断分组（每bit一个中断；word0=SGI,word1+=SPI）*/
 #define GICD_ISENABLER      0x0100U /* SPI 使能设置（每bit一个中断）*/
 #define GICD_ICENABLER      0x0180U /* SPI 使能清除 */
 #define GICD_IPRIORITYR     0x0400U /* 中断优先级（每字节一个中断）*/
+#define GICD_IGRPMODR       0x0D00U /* 中断分组修改器（配合IGROUPR决定Group 1 NS/S）*/
 #define GICD_IROUTER        0x6000U /* SPI 路由（64位/中断，ARE_NS模式）*/
 
 /* GICD_CTLR bit 定义 */
@@ -74,9 +76,11 @@ static inline void writeq(u64 val, volatile void *addr)
  * 管理 SGI（0-15）和 PPI（16-31）的使能与优先级
  */
 #define GICR_SGI_OFFSET     0x10000U            /* SGI帧相对RD帧的偏移 */
+#define GICR_IGROUPR0       0x0080U             /* SGI/PPI 中断分组 */
 #define GICR_ISENABLER0     0x0100U             /* SGI/PPI 使能设置 */
 #define GICR_ICENABLER0     0x0180U             /* SGI/PPI 使能清除 */
 #define GICR_IPRIORITYR0    0x0400U             /* SGI/PPI 优先级（每字节一个）*/
+#define GICR_IGRPMODR0      0x0D00U             /* SGI/PPI 中断分组修改器 */
 
 /* GICR_WAKER bit 定义 */
 #define GICR_WAKER_ProcessorSleep   (1U << 1)   /* 写0唤醒，写1休眠 */
@@ -115,6 +119,22 @@ void gicv3_init(void)
     writel(0, gicd + GICD_CTLR);
     while (readl(gicd + GICD_CTLR) & GICD_CTLR_RWP)
         ;
+
+    /*
+     * 1.1b 将所有 SPI（IRQ 32-1019）配置为 Group 1 Non-Secure。
+     * GICD_IGROUPR  每bit=1 → Group 1（非Secure Group 0）
+     * GICD_IGRPMODR 每bit=0 → Non-Secure（配合 IGROUPR=1 = Group 1 NS）
+     *
+     * GICv3 复位默认：IGROUPR=0（Group 0，触发 FIQ），我们必须显式设置。
+     * word 0 管理 SGI/PPI（IRQ 0-31），由 Redistributor 负责，此处跳过。
+     * word 1-31 管理 SPI（IRQ 32-1023）。
+     *
+     * 参考：irq-gic-v3.c: gic_dist_init()
+     */
+    for (i = 1; i < 32; i++) {
+        writel(0xFFFFFFFFU, gicd + GICD_IGROUPR  + i * 4);
+        writel(0x00000000U, gicd + GICD_IGRPMODR + i * 4);
+    }
 
     /*
      * 1.2 使能 Affinity Routing（ARE_NS）+ Group 1 Non-Secure。
@@ -165,6 +185,18 @@ void gicv3_init(void)
         while (readl(gicr + GICR_WAKER) & GICR_WAKER_ChildrenAsleep)
             ;
     }
+
+    /*
+     * 2.1b 将所有 SGI/PPI（IRQ 0-31）配置为 Group 1 Non-Secure。
+     * GICv3 复位默认：GICR_IGROUPR0=0（Group 0，触发FIQ），
+     * Virtual Timer PPI #27 因此默认走 FIQ 而非 IRQ，导致中断无法到达。
+     * 写入 0xFFFFFFFF 使所有 SGI/PPI 变为 Group 1，
+     * 配合 IGRPMODR0=0 → Group 1 Non-Secure → 触发 IRQ（EL1 可接收）。
+     *
+     * 参考：irq-gic-v3.c: gic_cpu_init()
+     */
+    writel(0xFFFFFFFFU, gicr_sgi + GICR_IGROUPR0);
+    writel(0x00000000U, gicr_sgi + GICR_IGRPMODR0);
 
     /*
      * 2.2 初始化 SGI/PPI（IRQ 0-31）：设置低优先级，禁用所有。

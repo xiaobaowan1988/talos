@@ -75,17 +75,38 @@ static unsigned long create_page_tables(void)
     unsigned long pud_phys = (unsigned long)init_pud;
 
     /*
-     * Step 1: 构建 L1（PUD）恒等映射条目
+     * Step 1a: 构建 L1[0]：设备内存区域 [0x00000000, 0x40000000)
+     *
+     * QEMU virt machine 中第一个 1GB 是设备 MMIO 区域，包括：
+     *   0x09000000: PL011 UART（内核启动时串口输出必须用到）
+     *   0x08000000: GIC v3 分发器
+     *   0x0a000000: VirtIO 设备
+     *
+     * 使用 MT_DEVICE_nGnRnE（index 0）属性：
+     *   - 严格顺序访问（no Gather/Reorder/Early-write-ack）
+     *   - 禁止执行（PXN + UXN）
+     *   - 不可缓存
+     *
+     * MMU 开启后 boot_printk() 需要写 UART，必须先映射此区域，
+     * 否则第一次 printk 就会触发 Translation Fault → 死循环。
+     */
+    init_pud[pud_index(0x00000000UL)] =
+        mk_block_desc(0x00000000UL,
+                      PD_ATTRINDX(0) |   /* MT_DEVICE_nGnRnE */
+                      PD_SH_OUTER     |  /* Outer Shareable（设备内存标准配置）*/
+                      PD_AF           |  /* Access Flag */
+                      PD_PXN          |  /* 特权态不可执行 */
+                      PD_UXN);           /* 用户态不可执行 */
+
+    /*
+     * Step 1b: 构建 L1[1]：RAM 区域 [0x40000000, 0x80000000)
      *
      * QEMU virt machine 将 1GB RAM 放在 0x40000000。
      * 0x40000000 >> 30 = 1，所以 init_pud[1] 是正确的 L1 索引。
      *
-     * 1GB Block Descriptor 格式（L1 Block）：
-     *   bits[1:0]  = 0b01（PD_BLOCK：Block descriptor at L1）
-     *   bits[4:2]  = 0b011（AttrIdx=3：MT_NORMAL，写回可缓存内存）
-     *   bits[9:8]  = 0b11（SH=Inner Shareable）
-     *   bit [10]   = 1（AF：Access Flag，避免Access Fault）
-     *   bits[47:30]= 0x40000000（1GB对齐的物理基址）
+     * 使用 MT_NORMAL（index 3）属性：
+     *   - 写回可缓存（Write-Back Read/Write-Allocate）
+     *   - Inner Shareable（对 SMP 广播缓存一致性操作）
      *
      * 注意：1GB Block Descriptor 中 bits[29:12] 必须为零（MBZ）。
      * 0x40000000 的 bits[29:12] 全为零，满足此要求。

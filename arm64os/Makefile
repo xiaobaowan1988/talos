@@ -44,11 +44,14 @@ LDFLAGS := -nostdlib -T linker.ld
 
 # ── Sources → objects ─────────────────────────────────────────────────────
 SRCS_S  := boot/entry.S
-SRCS_C  := drivers/uart.c \
-           mm/memblock.c  \
-           mm/mmu.c       \
-           mm/page_alloc.c \
-           mm/slab.c      \
+SRCS_C  := drivers/uart.c                   \
+           drivers/irqchip/gic.c            \
+           drivers/clocksource/timer.c      \
+           mm/memblock.c                    \
+           mm/mmu.c                         \
+           mm/page_alloc.c                  \
+           mm/slab.c                        \
+           kernel/irq.c                     \
            init/main.c
 
 OBJS    := $(SRCS_S:.S=.o) $(SRCS_C:.c=.o)
@@ -61,8 +64,8 @@ OBJS    := $(SRCS_S:.S=.o) $(SRCS_C:.c=.o)
 # -kernel kernel.elf  load ELF, set PC to entry point
 QEMU    := qemu-system-aarch64
 QFLAGS  := \
-    -machine virt          \
-    -cpu cortex-a72        \
+    -machine virt,gic-version=3 \
+    -cpu cortex-a72             \
     -m 128M                \
     -nographic             \
     -kernel kernel.elf
@@ -117,4 +120,5 @@ syms: kernel.elf
 # ── Clean ─────────────────────────────────────────────────────────────────
 clean:
 	rm -f $(OBJS) kernel.elf
-	rm -f mm/*.o
+	rm -f mm/*.o kernel/*.o
+	rm -f drivers/irqchip/*.o drivers/clocksource/*.o

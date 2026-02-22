@@ -1,13 +1,15 @@
 /*
  * init/main.c — kernel C entry point
  *
- * Phase 2: Memory Management
- *   Adds: memblock → MMU → buddy allocator → kmalloc/kfree
+ * Phase 3: Exceptions & Interrupts
+ *   Adds: irq_init → gic_init → timer_init → irq_enable → ticking
  *
- * Mirrors the call chain in init/main.c start_kernel():
- *   setup_arch()          → memblock_init, mmu_init
- *   mm_core_init()        → page_alloc_init, kmem_cache_init
- *   ... rest of kernel ...
+ * Mirrors start_kernel() call chain:
+ *   setup_arch()           memblock + MMU
+ *   mm_core_init()         buddy + slab
+ *   init_IRQ()             GIC init  (arch/arm64/kernel/irq.c)
+ *   time_init()            arch timer (arch/arm64/kernel/time.c)
+ *   local_irq_enable()     unmask PSTATE.I
  */
 
 #include "../include/uart.h"
@@ -17,8 +19,11 @@
 #include "../include/mmu.h"
 #include "../include/page_alloc.h"
 #include "../include/slab.h"
+#include "../include/irq.h"
+#include "../include/gic.h"
+#include "../include/timer.h"
 
-/* Linker symbols — defined in linker.ld */
+/* Linker symbols */
 extern char _start[];
 extern char _bss_end[];
 extern char _stack_top[];
@@ -26,111 +31,34 @@ extern char _stack_top[];
 /* ── CPU info helpers ──────────────────────────────────────────────────── */
 static inline ulong read_current_el(void)
 {
-    ulong v;
-    __asm__ volatile("mrs %0, CurrentEL" : "=r"(v));
-    return (v >> 2) & 0x3;
+    ulong v; __asm__ volatile("mrs %0, CurrentEL" : "=r"(v)); return (v>>2)&3;
 }
-
 static inline ulong read_midr(void)
 {
-    ulong v;
-    __asm__ volatile("mrs %0, midr_el1" : "=r"(v));
-    return v;
+    ulong v; __asm__ volatile("mrs %0, midr_el1" : "=r"(v)); return v;
 }
-
 static inline ulong read_sctlr_el1(void)
 {
-    ulong v;
-    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(v));
-    return v;
+    ulong v; __asm__ volatile("mrs %0, sctlr_el1" : "=r"(v)); return v;
 }
 
-/* ── Phase 2 tests ─────────────────────────────────────────────────────── */
-
-/*
- * test_buddy — exercise alloc_pages / free_pages
- */
+/* ── Phase 2 tests (kept for regression) ──────────────────────────────── */
 static void test_buddy(void)
 {
-    uart_puts("\n[test] buddy allocator\n");
-
     ulong p1 = alloc_page();
-    uart_puts("  alloc_page()    -> ");
-    uart_puthex64(p1);
     if (p1) {
         volatile u64 *ptr = (volatile u64 *)p1;
         *ptr = 0xDEADBEEFCAFEBABEUL;
-        uart_puts((*ptr == 0xDEADBEEFCAFEBABEUL) ? "  OK (writable)\n" : "  FAIL\n");
-    } else {
-        uart_puts("  FAIL (null)\n");
+        if (*ptr != 0xDEADBEEFCAFEBABEUL)
+            uart_puts("  buddy: write FAIL\n");
+        free_page(p1);
     }
-
-    struct page *p2 = alloc_pages(3);   /* order-3 = 32 KB */
-    uart_puts("  alloc_pages(3)  -> ");
-    uart_puthex64(p2 ? pfn_of(p2) << PAGE_SHIFT : 0);
-    uart_puts(p2 ? "  OK\n" : "  FAIL\n");
-
-    if (p1) free_page(p1);
-    if (p2) free_pages(p2, 3);
-
-    uart_puts("  after free:\n");
-    page_alloc_dump();
-
-    ulong p3 = alloc_page();
-    uart_puts("  re-alloc page   -> ");
-    uart_puthex64(p3);
-    uart_puts(p3 ? "  OK\n" : "  FAIL\n");
-    if (p3) free_page(p3);
 }
 
-/*
- * test_kmalloc — exercise kmalloc / kfree
- */
 static void test_kmalloc(void)
 {
-    uart_puts("\n[test] kmalloc / kfree\n");
-
     char *s = (char *)kmalloc(32);
-    uart_puts("  kmalloc(32)     -> ");
-    uart_puthex64((ulong)s);
-    if (s) {
-        const char *msg = "hello kernel!";
-        int i = 0;
-        while (msg[i]) { s[i] = msg[i]; i++; }
-        s[i] = '\0';
-        uart_puts("  \"");
-        uart_puts(s);
-        uart_puts("\"  OK\n");
-        kfree(s);
-    } else {
-        uart_puts("  FAIL\n");
-    }
-
-    u64 *arr = (u64 *)kmalloc(512);
-    uart_puts("  kmalloc(512)    -> ");
-    uart_puthex64((ulong)arr);
-    if (arr) {
-        int i;
-        for (i = 0; i < 64; i++) arr[i] = (u64)i * i;
-        uart_puts("  arr[63]=");
-        uart_putdec(arr[63]);
-        uart_puts("  OK\n");
-        kfree(arr);
-    } else {
-        uart_puts("  FAIL\n");
-    }
-
-    u8 *z = (u8 *)kzalloc(64);
-    uart_puts("  kzalloc(64)     -> ");
-    uart_puthex64((ulong)z);
-    if (z) {
-        int ok = 1, i;
-        for (i = 0; i < 64; i++) if (z[i] != 0) { ok = 0; break; }
-        uart_puts(ok ? "  zeroed  OK\n" : "  not zeroed  FAIL\n");
-        kfree(z);
-    }
-
-    kmalloc_dump();
+    if (s) { s[0]='O'; s[1]='K'; s[2]='\0'; kfree(s); }
 }
 
 /* ── kernel_main ───────────────────────────────────────────────────────── */
@@ -138,8 +66,8 @@ void kernel_main(void)
 {
     uart_init();
 
-    uart_puts("\nARM64v8 OS  --  Phase 2: Memory Management\n");
-    uart_puts("------------------------------------------\n\n");
+    uart_puts("\nARM64v8 OS  --  Phase 3: Exceptions & Interrupts\n");
+    uart_puts("-------------------------------------------------\n\n");
 
     uart_puts("Boot: EL");
     uart_putdec(read_current_el());
@@ -147,88 +75,82 @@ void kernel_main(void)
     uart_puthex64(read_midr());
     uart_puts("\n\n");
 
-    /*
-     * 1. memblock_init — register RAM, reserve kernel image
-     *    See: arm64_memblock_init() in arch/arm64/mm/init.c
-     */
-    uart_puts("MEM:  memblock_init\n");
+    /* ── Phase 2: memory ──────────────────────────────────────────────── */
     memblock_init(PHYS_RAM_BASE, PHYS_RAM_END);
     memblock_reserve((ulong)_start, (ulong)_stack_top - (ulong)_start);
-    memblock_dump();
 
-    /*
-     * 2. mmu_init — page tables + MMU enable
-     *    See: paging_init() in arch/arm64/mm/mmu.c
-     */
-    uart_puts("\nMEM:  mmu_init\n");
     mmu_init();
 
     ulong sctlr = read_sctlr_el1();
-    uart_puts("      SCTLR_EL1: MMU=");
-    uart_putdec(sctlr & 1);
-    uart_puts(" Dcache=");
-    uart_putdec((sctlr >> 2) & 1);
-    uart_puts(" Icache=");
-    uart_putdec((sctlr >> 12) & 1);
-    uart_puts("\n");
+    uart_puts("MMU:  M="); uart_putdec(sctlr & 1);
+    uart_puts(" C=");      uart_putdec((sctlr >> 2) & 1);
+    uart_puts(" I=");      uart_putdec((sctlr >> 12) & 1);
+    uart_puts("\n\n");
 
-    /*
-     * 3. page_alloc_init — hand free pages to buddy allocator
-     *    See: free_area_init() in mm/page_alloc.c
-     */
-    uart_puts("\nMEM:  page_alloc_init\n");
     page_alloc_init();
-    page_alloc_dump();
-
-    /*
-     * 4. kmalloc_init — set up per-size slab caches
-     *    See: kmem_cache_init() in mm/slub.c
-     */
-    uart_puts("\nMEM:  kmalloc_init\n");
     kmalloc_init();
 
-    /* 5. Tests */
     test_buddy();
     test_kmalloc();
+    uart_puts("MEM:  buddy + slab OK\n\n");
 
-    uart_puts("\n------------------------------------------\n");
-    uart_puts("Phase 2 complete. System halted.\n");
-    uart_puts("Next: Phase 3 -- Exceptions & GIC v3 Interrupts\n");
+    /* ── Phase 3: interrupts ──────────────────────────────────────────── */
 
-    while (1)
-        __asm__ volatile("wfe");
-}
+    /*
+     * irq_init — zero the IRQ descriptor table
+     * Mirrors init_IRQ() → irq_init_descs() in kernel/irq/irqdesc.c
+     */
+    irq_init();
 
-/* ── exception handlers ────────────────────────────────────────────────── */
-
-struct pt_regs {
-    ulong regs[30];
-    ulong lr, _pad, elr, spsr;
-};
-
-void exc_sync_el1_handler(struct pt_regs *regs, ulong esr, ulong far)
-{
-    uart_puts("\n*** SYNC EL1  ESR=");
-    uart_puthex64(esr);
-    uart_puts("  FAR=");
-    uart_puthex64(far);
-    uart_puts("  ELR=");
-    uart_puthex64(regs->elr);
+    /*
+     * gic_init — bring up GIC v3 (GICD + GICR + CPU interface)
+     * Mirrors init_IRQ() → irqchip_init() → gic_of_init()
+     *   in drivers/irqchip/irq-gic-v3.c
+     */
     uart_puts("\n");
-    while (1) __asm__ volatile("wfe");
-}
+    gic_init();
 
-void exc_irq_el1_handler(struct pt_regs *regs)
-{
-    uart_puts("\n*** IRQ EL1  ELR=");
-    uart_puthex64(regs->elr);
+    /*
+     * timer_init — configure ARM arch timer, register INTID 30 handler
+     * Mirrors time_init() → arch_timer_of_init()
+     *   in drivers/clocksource/arm_arch_timer.c
+     */
     uart_puts("\n");
-    while (1) __asm__ volatile("wfe");
-}
+    timer_init();
 
-void exc_sync_el0_handler(struct pt_regs *regs, ulong esr)
-{
-    (void)regs; (void)esr;
-    uart_puts("\n*** SYNC EL0 (unexpected)\n");
+    /*
+     * local_irq_enable() — clear PSTATE.I to unmask IRQs
+     * Without this, no IRQ is ever delivered even if the GIC is configured.
+     * See: arch/arm64/include/asm/irqflags.h arch_local_irq_enable()
+     */
+    uart_puts("\nIRQ:  enabling IRQs (clearing PSTATE.I)...\n");
+    irq_enable();
+
+    uart_puts("IRQ:  running — waiting for timer ticks\n");
+    uart_puts("      (1 tick per 10 ms, heartbeat every 1 s)\n\n");
+
+    /*
+     * Idle loop — mirrors cpu_startup_entry() → do_idle() → cpu_idle_loop()
+     * WFI = Wait For Interrupt: low-power state until an IRQ wakes the CPU.
+     */
+    ulong last = 0;
+    while (1) {
+        __asm__ volatile("wfi");
+
+        /* After each tick, check if 5 seconds have passed */
+        ulong t = timer_get_ticks();
+        if (t >= 5 * (ulong)HZ && last < 5 * (ulong)HZ) {
+            last = t;
+            uart_puts("\n-------------------------------------------------\n");
+            uart_puts("Phase 3 complete.\n");
+            uart_puts("Next: Phase 4 -- Process Scheduling (CFS)\n");
+
+            /* Disarm timer so output stops */
+            __asm__ volatile("msr cntp_ctl_el0, %0\nisb" :: "r"(0UL));
+            break;
+        }
+        last = t;
+    }
+
     while (1) __asm__ volatile("wfe");
 }

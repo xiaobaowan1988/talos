@@ -107,8 +107,8 @@ $(BINARY): $(TARGET)
 # -cpu cortex-a72   : Cortex-A72（ARMv8-A，支持 EL2）
 # -m 1G             : 1GB 内存
 # -kernel           : 加载 ELF 内核镜像
-# -nographic        : 无图形界面，串口输出到 stdio
-# -serial stdio     : PL011 UART 连接到标准输入输出
+# -nographic        : 无图形界面，PL011 串口自动重定向到 stdio
+#                     （不要额外加 -serial stdio，会冲突报错）
 #
 # 退出 QEMU：Ctrl-A X
 #
@@ -119,8 +119,7 @@ run: $(TARGET)
 	    -cpu cortex-a72 \
 	    -m 1G \
 	    -kernel $(TARGET) \
-	    -nographic \
-	    -serial stdio
+	    -nographic
 
 # ---- 带 GDB 调试的运行 ----
 #

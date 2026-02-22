@@ -2,7 +2,7 @@
 /*
  * arm64os/kernel/main.c
  *
- * 内核主入口及 Phase 1 异常处理桩函数
+ * 内核主入口及异常处理桩函数
  *
  * 参考：init/main.c, arch/arm64/kernel/setup.c
  *
@@ -11,13 +11,30 @@
  *   - handle_sync_exception()：同步异常处理桩（打印寄存器信息）
  *   - handle_irq()：IRQ 处理桩
  *   - panic_unhandled()：不可恢复异常处理
+ *
+ * Phase 2 新增：
+ *   - mmu_init()：建立恒等映射页表，开启 MMU
+ *   - memblock_init()：初始化早期物理内存分配器
+ *   - buddy_init()：初始化 Buddy 物理页分配器
+ *   - test_buddy()：验证 Buddy 分配/释放/合并正确性
  */
 
 #include <linux/types.h>
+#include <asm/memory.h>
 
 /* 由 printk.c 提供 */
 void boot_printk(const char *s);
 void boot_printk_hex(unsigned long val);
+
+/* Phase 2：MMU 初始化（arch/arm64/mm/mmu.c + proc.S） */
+void mmu_init(void);
+
+/* Phase 2：memblock（mm/memblock.c） */
+void memblock_init(phys_addr_t phys_start, phys_addr_t phys_size);
+
+/* Phase 2：Buddy 分配器（mm/page_alloc.c） */
+void buddy_init(void);
+void test_buddy(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -116,8 +133,7 @@ void handle_sync_exception(struct pt_regs *regs)
     boot_printk_hex(regs->pstate);
     boot_printk("\n");
 
-    /* Phase 1: 挂死（后续 Phase 将实现恢复逻辑）*/
-    boot_printk("[PANIC] Unrecoverable in Phase 1 — halting.\n");
+    boot_printk("[PANIC] Unrecoverable — halting.\n");
     while (1)
         ;
 }
@@ -125,13 +141,13 @@ void handle_sync_exception(struct pt_regs *regs)
 /*
  * handle_irq - IRQ 中断 C 处理函数
  *
- * Phase 1：GIC 未初始化，不应有真实 IRQ，打印提示后返回。
+ * Phase 2：GIC 未初始化，不应有真实 IRQ，打印提示后返回。
  * Phase 3 GIC v3 初始化后将在此驱动中断控制器读取 IAR 并分发。
  */
 void handle_irq(struct pt_regs *regs)
 {
     (void)regs;
-    boot_printk("[IRQ] Spurious interrupt (GIC not initialized in Phase 1)\n");
+    boot_printk("[IRQ] Spurious interrupt (GIC not initialized in Phase 2)\n");
     /* 无法 EOI，但 kernel_exit 会 eret 返回 */
 }
 
@@ -164,16 +180,23 @@ void panic_unhandled(void)
  * start_kernel - 内核 C 入口点
  *
  * 由 head.S setup_el1 在完成汇编初始化后调用：
+ *
+ * Phase 1:
  *   1. 打印启动横幅
  *   2. 验证关键地址（内核文本段、BSS、FDT）
- *   3. Phase 1 结束，进入死循环（等待 Phase 2 实现调度器）
+ *
+ * Phase 2 新增：
+ *   3. mmu_init()       — 建立恒等映射页表，开启 MMU
+ *   4. memblock_init()  — 初始化早期物理内存分配器
+ *   5. buddy_init()     — 初始化 Buddy 物理页分配器
+ *   6. test_buddy()     — 验证 Buddy 功能
  *
  * 参考：init/main.c: asmlinkage __visible void __init start_kernel(void)
  */
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 1: Boot + Exception Vectors\n");
+    boot_printk("[BOOT] Phase 2: MMU + Buddy Allocator\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -204,25 +227,36 @@ void start_kernel(void)
         boot_printk("\n");
     }
 
-    /* 读取当前 EL（验证运行于 EL1）*/
+    /* ---- Phase 2: MMU 初始化 ---- */
+    boot_printk("[BOOT] Initializing MMU (identity mapping)...\n");
+    mmu_init();
+    boot_printk("[BOOT] MMU enabled (SCTLR_EL1.M = 1)\n");
+
+    /* 验证 SCTLR_EL1.M 已置位 */
     {
-        unsigned long current_el;
-        __asm__ volatile("mrs %0, CurrentEL" : "=r"(current_el));
-        current_el = (current_el >> 2) & 0x3;
-        boot_printk("[BOOT] CurrentEL     : EL");
-        /* 输出 EL 数值（Phase 1 只支持个位数）*/
-        {
-            char el_str[2] = {'0' + (char)current_el, '\0'};
-            boot_printk(el_str);
-        }
-        boot_printk(" (expected: EL1)\n");
+        unsigned long sctlr;
+        __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+        boot_printk("[BOOT] SCTLR_EL1     : ");
+        boot_printk_hex(sctlr);
+        boot_printk(" (M=");
+        boot_printk((sctlr & 1) ? "1" : "0");
+        boot_printk(")\n");
     }
 
-    boot_printk("[BOOT] Exception vectors installed\n");
-    boot_printk("[BOOT] start_kernel() reached\n");
-    boot_printk("[BOOT] Phase 1 complete — halting (Phase 2 will add scheduler)\n");
+    /* ---- Phase 2: 物理内存初始化 ---- */
+    boot_printk("[BOOT] Initializing memblock...\n");
+    memblock_init(PHYS_OFFSET, PHYS_SIZE);
 
-    /* Phase 1 终态：无调度器，无用户态进程，挂死等待 Phase 2 */
+    boot_printk("[BOOT] Initializing buddy allocator...\n");
+    buddy_init();
+
+    /* ---- Phase 2: 验证 Buddy 分配器 ---- */
+    test_buddy();
+
+    boot_printk("[BOOT] Phase 2 complete\n");
+    boot_printk("[BOOT] Phase 3 will add GIC v3 + arch timer\n");
+
+    /* Phase 2 终态：无调度器，无用户态进程，挂死等待 Phase 3 */
     while (1)
         ;
 }

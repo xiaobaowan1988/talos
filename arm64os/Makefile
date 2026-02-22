@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 1 构建系统
+# Phase 2 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF
@@ -13,12 +13,31 @@
 #   - qemu-system-aarch64（运行验证）
 
 # ---- 交叉编译工具链 ----
+#
+# 支持两种工具链：
+#   1. GCC 交叉编译器（默认）：
+#        CROSS_COMPILE=aarch64-linux-gnu- make
+#   2. LLVM/Clang（系统无 GCC 交叉编译器时使用）：
+#        make LLVM=1
+#
+# LLVM=1 时使用 clang -target aarch64-linux-gnu + ld.lld
+#
+LLVM            ?= 0
+
+ifeq ($(LLVM),1)
+CC              := clang -target aarch64-linux-gnu
+LD              := ld.lld
+OBJCOPY         := llvm-objcopy
+OBJDUMP         := llvm-objdump
+READELF         := llvm-readelf
+else
 CROSS_COMPILE   ?= aarch64-linux-gnu-
 CC              := $(CROSS_COMPILE)gcc
 LD              := $(CROSS_COMPILE)ld
 OBJCOPY         := $(CROSS_COMPILE)objcopy
 OBJDUMP         := $(CROSS_COMPILE)objdump
 READELF         := $(CROSS_COMPILE)readelf
+endif
 
 # ---- 编译选项 ----
 #
@@ -44,7 +63,8 @@ CFLAGS := \
     -pipe \
     -Wall \
     -Wextra \
-    -Wno-unused-parameter
+    -Wno-unused-parameter \
+    -Wno-unused-function
 
 # 汇编选项（.S 文件经过 C 预处理器，可使用 #include / #define）
 ASFLAGS := \
@@ -64,10 +84,15 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
+    arch/arm64/mm/proc.o \
+    arch/arm64/mm/tlb.o \
+    arch/arm64/mm/mmu.o \
+    mm/memblock.o \
+    mm/page_alloc.o \
     kernel/printk.o \
     kernel/main.o
 
@@ -92,6 +117,18 @@ $(TARGET): $(OBJS) $(LDSCRIPT)
 # -x assembler-with-cpp 显式指定文件类型。
 arch/arm64/kernel/%.o: arch/arm64/kernel/%.S
 	$(CC) $(ASFLAGS) -x assembler-with-cpp -c -o $@ $<
+
+# Phase 2: arch/arm64/mm 汇编文件
+arch/arm64/mm/%.o: arch/arm64/mm/%.S
+	$(CC) $(ASFLAGS) -x assembler-with-cpp -c -o $@ $<
+
+# Phase 2: arch/arm64/mm C 文件
+arch/arm64/mm/%.o: arch/arm64/mm/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 2: mm/ C 文件
+mm/%.o: mm/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---- 编译 C 文件 ----
 kernel/%.o: kernel/%.c
@@ -163,7 +200,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 1 Build System"
+	@echo "arm64os Phase 2 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

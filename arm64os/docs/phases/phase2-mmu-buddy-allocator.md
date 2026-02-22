@@ -170,7 +170,7 @@ static void __free_one_page(struct page *page, unsigned long pfn,
 
 ## 2.4 关键难点与注意事项
 
-1. **identity map窗口**：MMU开启瞬间CPU还在物理地址执行，必须保证物理地址和虚拟地址都能访问到同一条指令（`isb`之前用identity map，之后跳转到KIMAGE_VADDR高地址）。
+1. **identity map窗口**：MMU开启瞬间CPU还在物理地址执行，必须保证物理地址和虚拟地址都能访问到同一条指令。Phase 2 实现中使用**恒等映射（VA == PA）**，即只配置 TTBR0 的恒等映射，MMU开启后继续在低虚拟地址运行。TTBR1高地址映射（`KIMAGE_VADDR = 0xFFFF000040000000`）和到高虚拟地址的跳转蹦床留待后续阶段完善。
 
 2. **KASLR简化**：教学实现可以固定加载地址，不实现随机化。
 
@@ -178,7 +178,7 @@ static void __free_one_page(struct page *page, unsigned long pfn,
 
 4. **memblock vs buddy**：MMU开启前用`memblock`分配早期内存（简单线性分配），buddy初始化后才能动态管理。
 
-5. **struct page内存**：1GB物理内存需要约16MB的`struct page`数组（1GB/4KB * 64字节/struct page = 16MB）。
+5. **struct page内存**：1GB物理内存需要约8MB的`struct page`数组（1GB/4KB × 32字节/struct page = 8MB）。页描述符数组本身由 memblock 在内核镜像末尾分配。
 
 ## 2.5 验证方法
 
@@ -202,13 +202,22 @@ void test_buddy(void) {
 
 ```
 arm64os/
-├── arch/arm64/mm/mmu.c           ← MMU初始化（核心）
-├── arch/arm64/mm/tlb.S           ← TLB操作辅助
+├── arch/arm64/mm/
+│   ├── mmu.c                     ← MMU初始化（核心：create_page_tables + mmu_init）
+│   ├── proc.S                    ← CPU初始化（cpu_init: MAIR/TCR + enable_mmu: SCTLR_EL1.M）
+│   └── tlb.S                     ← TLB操作辅助（tlb_flush_all）
 ├── arch/arm64/include/asm/
-│   ├── pgtable.h                 ← 页表项定义
-│   └── memory.h                  ← 虚拟地址空间布局
+│   ├── pgtable.h                 ← 页表项定义（L0/L1/L2/L3描述符格式）
+│   └── memory.h                  ← 虚拟地址空间布局（PAGE_SIZE, PHYS_OFFSET等）
+├── include/linux/
+│   └── list.h                    ← 双向链表（Buddy分配器依赖）
 ├── mm/
-│   ├── memblock.c                ← 早期物理内存分配
-│   └── page_alloc.c              ← Buddy分配器核心
-└── Makefile
+│   ├── memblock.c                ← 早期物理内存分配（MMU开启前使用）
+│   └── page_alloc.c              ← Buddy分配器核心（order 0..10）
+└── Makefile                      ← 新增Phase 2目标文件
 ```
+
+**Phase 2 映射策略（简化实现）**：
+- TTBR0：恒等映射（VA == PA），覆盖物理内存 `[0x40000000, 0x80000000)`
+- TTBR1：暂未使用（内核继续在低VA运行）
+- 高虚拟地址跳转蹦床留待后续阶段

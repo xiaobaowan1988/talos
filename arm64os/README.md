@@ -41,12 +41,11 @@ arm64os/
 │   ├── kernel/
 │   │   ├── head.S          # 启动入口，CPU初始化
 │   │   ├── entry.S         # 异常向量表，中断入口
-│   │   ├── syscall.S       # 系统调用分发
-│   │   └── proc.S          # CPU特性检测
+│   │   └── syscall.S       # 系统调用分发
 │   ├── mm/
 │   │   ├── mmu.c           # MMU初始化，页表建立
-│   │   ├── tlb.S           # TLB操作
-│   │   └── cache.S         # Cache操作
+│   │   ├── proc.S          # CPU特性检测（__cpu_setup, __enable_mmu）
+│   │   └── tlb.S           # TLB操作
 │   └── include/
 │       ├── asm/pgtable.h   # 页表项定义（PGD/PUD/PMD/PTE）
 │       ├── asm/memory.h    # 虚拟地址空间布局

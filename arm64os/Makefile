@@ -155,20 +155,36 @@ kernel/%.o: kernel/%.c
 $(BINARY): $(TARGET)
 	$(OBJCOPY) -O binary $< $@
 
+# ---- QEMU 安装检查 ----
+#
+# 若 qemu-system-aarch64 不在 PATH 中，尝试通过 apt-get 安装。
+# 需要 root 权限（sudo 或直接 root）。
+#
+QEMU            := qemu-system-aarch64
+
+.PHONY: check-qemu
+check-qemu:
+	@if ! command -v $(QEMU) >/dev/null 2>&1; then \
+	    echo ">>> $(QEMU) not found, installing qemu-system-arm via apt-get..."; \
+	    apt-get install -y --fix-missing qemu-system-arm || \
+	        { echo "ERROR: failed to install QEMU. Install manually: apt-get install qemu-system-arm"; exit 1; }; \
+	    echo ">>> QEMU installed: $$($(QEMU) --version | head -1)"; \
+	fi
+
 # ---- 运行（QEMU）----
 #
-# -M virt           : ARM virt machine（通用 ARM 开发板模型）
-# -cpu cortex-a72   : Cortex-A72（ARMv8-A，支持 EL2）
-# -m 1G             : 1GB 内存
-# -kernel           : 加载 ELF 内核镜像
-# -nographic        : 无图形界面，PL011 串口自动重定向到 stdio
-#                     （不要额外加 -serial stdio，会冲突报错）
+# -M virt,gic-version=3 : ARM virt machine，使用 GIC v3 中断控制器
+# -cpu cortex-a72       : Cortex-A72（ARMv8-A，支持 EL2）
+# -m 1G                 : 1GB 内存
+# -kernel               : 加载 ELF 内核镜像
+# -nographic            : 无图形界面，PL011 串口自动重定向到 stdio
+#                         （不要额外加 -serial stdio，会冲突报错）
 #
 # 退出 QEMU：Ctrl-A X
 #
 .PHONY: run
-run: $(TARGET)
-	qemu-system-aarch64 \
+run: check-qemu $(TARGET)
+	$(QEMU) \
 	    -M virt,gic-version=3 \
 	    -cpu cortex-a72 \
 	    -m 1G \
@@ -189,9 +205,9 @@ run: $(TARGET)
 QEMU_TIMEOUT    ?= 15
 
 .PHONY: test
-test: $(TARGET)
+test: check-qemu $(TARGET)
 	@echo "=== Running Phase 3 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
-	@timeout $(QEMU_TIMEOUT) qemu-system-aarch64 \
+	@timeout $(QEMU_TIMEOUT) $(QEMU) \
 	    -M virt,gic-version=3 \
 	    -cpu cortex-a72 \
 	    -m 1G \
@@ -216,8 +232,8 @@ test: $(TARGET)
 #   (gdb) c
 #
 .PHONY: debug
-debug: $(TARGET)
-	qemu-system-aarch64 \
+debug: check-qemu $(TARGET)
+	$(QEMU) \
 	    -M virt,gic-version=3 \
 	    -cpu cortex-a72 \
 	    -m 1G \

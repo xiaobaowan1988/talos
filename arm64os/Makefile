@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 9 构建系统
+# Phase 10 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2+3+4+5+6+7+8+9 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3+4+5+6+7+8+9+10 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -133,6 +133,15 @@ OBJS := \
     fs/overlayfs/dir.o \
     fs/overlayfs/file.o \
     fs/overlayfs/copy_up.o \
+    kernel/nsproxy.o \
+    kernel/pid_namespace.o \
+    kernel/user_namespace.o \
+    kernel/utsname.o \
+    fs/mount.o \
+    kernel/cgroup/cgroup.o \
+    kernel/cgroup/cpu.o \
+    kernel/cgroup/memory.o \
+    kernel/cgroup/pids.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -227,6 +236,10 @@ fs/xfs/%.o: fs/xfs/%.c
 
 # Phase 9: fs/overlayfs/ C 文件
 fs/overlayfs/%.o: fs/overlayfs/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 10: kernel/cgroup/ C 文件
+kernel/cgroup/%.o: kernel/cgroup/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---- 编译 C 文件 ----
@@ -340,7 +353,7 @@ QEMU_TIMEOUT    ?= 30
 
 .PHONY: test
 test: check-qemu $(TARGET) $(DISK_IMG)
-	@echo "=== Running Phase 9 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@echo "=== Running Phase 10 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) $(QEMU) \
 	    $(QEMU_COMMON) \
 	    -nographic \
@@ -376,6 +389,14 @@ test: check-qemu $(TARGET) $(DISK_IMG)
 	@grep -q "copy-up write+read: PASS"      /tmp/arm64os_test.log && echo "PASS: overlayfs copy-up"               || echo "FAIL: 'copy-up write+read: PASS' not found"
 	@grep -q "whiteout: PASS"                /tmp/arm64os_test.log && echo "PASS: overlayfs whiteout"              || echo "FAIL: 'whiteout: PASS' not found"
 	@grep -q "Phase 9 complete"              /tmp/arm64os_test.log && echo "PASS: Phase 9 complete"               || echo "FAIL: 'Phase 9 complete' not found"
+	@grep -q "namespace init: PASS"         /tmp/arm64os_test.log && echo "PASS: namespace init"                  || echo "FAIL: 'namespace init: PASS' not found"
+	@grep -q "PID namespace: PASS"          /tmp/arm64os_test.log && echo "PASS: PID namespace"                   || echo "FAIL: 'PID namespace: PASS' not found"
+	@grep -q "UTS namespace: PASS"          /tmp/arm64os_test.log && echo "PASS: UTS namespace"                   || echo "FAIL: 'UTS namespace: PASS' not found"
+	@grep -q "mount namespace: PASS"        /tmp/arm64os_test.log && echo "PASS: mount namespace"                 || echo "FAIL: 'mount namespace: PASS' not found"
+	@grep -q "user namespace: PASS"         /tmp/arm64os_test.log && echo "PASS: user namespace"                  || echo "FAIL: 'user namespace: PASS' not found"
+	@grep -q "cgroup memory: PASS"          /tmp/arm64os_test.log && echo "PASS: cgroup memory"                   || echo "FAIL: 'cgroup memory: PASS' not found"
+	@grep -q "cgroup pids: PASS"            /tmp/arm64os_test.log && echo "PASS: cgroup pids"                     || echo "FAIL: 'cgroup pids: PASS' not found"
+	@grep -q "Phase 10 complete"            /tmp/arm64os_test.log && echo "PASS: Phase 10 complete"               || echo "FAIL: 'Phase 10 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -418,7 +439,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 9 Build System"
+	@echo "arm64os Phase 10 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

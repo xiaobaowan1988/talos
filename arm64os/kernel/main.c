@@ -60,12 +60,24 @@
  *   - copy-up 测试（写入触发 lower→upper 复制）
  *   - whiteout 测试（删除 lower 文件，创建屏蔽标记）
  *
+ * Phase 10 新增：
+ *   - nsproxy_init()：初始化 namespace 子系统（7 种 namespace）
+ *   - cgroup_init()：初始化 cgroup v2（CPU、内存、PIDs 控制器）
+ *   - 测试 PID namespace：创建子 namespace，验证 PID 从 1 开始
+ *   - 测试 UTS namespace：创建新 namespace，设置不同主机名
+ *   - 测试 Mount namespace：创建新 namespace，验证挂载表隔离
+ *   - 测试 User namespace：UID 映射（容器内 root → 宿主非特权 UID）
+ *   - 测试 cgroup 内存控制器：设置限制，验证超限拒绝
+ *   - 测试 cgroup PIDs 控制器：设置限制，验证进程数限制
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
+#include <linux/nsproxy.h>
+#include <linux/cgroup.h>
 #include <asm/memory.h>
 
 /* 由 printk.c 提供 */
@@ -146,6 +158,9 @@ static void test_phase8(void);
 void ovl_init(void);
 int do_sys_unlink(struct files_struct *files, const char *pathname);
 static void test_phase9(void);
+
+/* Phase 10：Namespace + cgroup v2（kernel/nsproxy.c, kernel/cgroup/） */
+static void test_phase10(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -304,7 +319,7 @@ void panic_unhandled(void)
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 9: overlayfs\n");
+    boot_printk("[BOOT] Phase 10: Namespaces + cgroup v2\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -512,7 +527,28 @@ void start_kernel(void)
 
     boot_printk("[BOOT] Phase 9 complete\n");
 
-    /* Phase 9 终态：调度器运行中，挂死 idle 进程 */
+    /* ---- Phase 10: Linux Namespaces + cgroup v2 ---- */
+    /*
+     * Phase 10 初始化顺序：
+     *   1. nsproxy_init() — 初始化 7 种 namespace 子系统
+     *   2. cgroup_init() — 初始化 cgroup v2 统一层级 + 控制器
+     *   3. 运行验证测试：PID namespace、UTS namespace、
+     *      Mount namespace、User namespace、cgroup 内存/PIDs
+     */
+    boot_printk("[BOOT] === Phase 10: Namespaces + cgroup v2 ===\n");
+
+    boot_printk("[BOOT] Initializing namespaces...\n");
+    nsproxy_init();
+
+    boot_printk("[BOOT] Initializing cgroup v2...\n");
+    cgroup_init();
+
+    /* 运行 Phase 10 测试 */
+    test_phase10();
+
+    boot_printk("[BOOT] Phase 10 complete\n");
+
+    /* Phase 10 终态：调度器运行中，挂死 idle 进程 */
     while (1)
         __asm__ volatile("wfi");
 }
@@ -1229,4 +1265,415 @@ static void test_phase9(void)
     }
 
     boot_printk("[BOOT] Phase 9 overlayfs tests: all passed\n");
+}
+
+/*
+ * ============================================================
+ * Phase 10: Namespaces + cgroup v2 验证
+ *
+ * 流程：
+ *   1. PID namespace：创建子 namespace，验证 PID 从 1 开始
+ *   2. UTS namespace：创建新 namespace，设置不同主机名，验证隔离
+ *   3. Mount namespace：创建新 namespace，验证挂载表独立
+ *   4. User namespace：创建新 namespace，设置 UID 映射，验证翻译
+ *   5. cgroup 内存控制器：创建 cgroup，设置内存限制，验证超限拒绝
+ *   6. cgroup PIDs 控制器：创建 cgroup，设置进程数限制，验证超限拒绝
+ *
+ * 参考：Phase 10 设计文档 §10.10
+ * ============================================================
+ */
+static void test_phase10(void)
+{
+    boot_printk("[BOOT] === Phase 10: namespace + cgroup test ===\n");
+
+    /* ============================================================
+     * Test 1: PID namespace 隔离
+     *
+     * 创建子 PID namespace（level=1），分配 PID，
+     * 验证子 namespace 的 PID 从 1 开始。
+     * 这是容器 init 进程 PID=1 的基础。
+     * ============================================================
+     */
+    boot_printk("[p10-test] === PID namespace test ===\n");
+    {
+        struct pid_namespace *child_ns;
+        int pid1, pid2;
+
+        /* 创建子 PID namespace */
+        child_ns = create_pid_namespace(&init_pid_ns);
+        if (!child_ns) {
+            boot_printk("[p10-test] FAIL: create_pid_namespace returned NULL\n");
+            return;
+        }
+
+        /* 验证层级 */
+        if (child_ns->level != 1) {
+            boot_printk("[p10-test] FAIL: child ns level != 1\n");
+            return;
+        }
+
+        /* 在子 namespace 中分配 PID */
+        pid1 = alloc_pid_nr(child_ns);
+        pid2 = alloc_pid_nr(child_ns);
+
+        boot_printk("[p10-test] Child ns: first PID=");
+        boot_printk_hex((unsigned long)pid1);
+        boot_printk(", second PID=");
+        boot_printk_hex((unsigned long)pid2);
+        boot_printk("\n");
+
+        /* 容器内第一个进程应该得到 PID 1（init） */
+        if (pid1 == 1 && pid2 == 2) {
+            boot_printk("[p10-test] PID namespace: PASS\n");
+        } else {
+            boot_printk("[p10-test] FAIL: expected PID 1,2 in child ns\n");
+            return;
+        }
+
+        put_pid_ns(child_ns);
+    }
+
+    /* ============================================================
+     * Test 2: UTS namespace 隔离
+     *
+     * 创建新 UTS namespace，设置不同主机名，
+     * 验证宿主 namespace 的主机名未被修改。
+     * ============================================================
+     */
+    boot_printk("[p10-test] === UTS namespace test ===\n");
+    {
+        struct uts_namespace *container_uts;
+
+        /* 创建容器 UTS namespace（从 init_uts_ns 复制） */
+        container_uts = create_uts_namespace(&init_uts_ns);
+        if (!container_uts) {
+            boot_printk("[p10-test] FAIL: create_uts_namespace returned NULL\n");
+            return;
+        }
+
+        /* 容器设置自己的主机名 */
+        uts_ns_set_hostname(container_uts, "container1");
+
+        boot_printk("[p10-test] Host hostname: ");
+        boot_printk(init_uts_ns.nodename);
+        boot_printk("\n");
+        boot_printk("[p10-test] Container hostname: ");
+        boot_printk(container_uts->nodename);
+        boot_printk("\n");
+
+        /* 验证隔离：宿主主机名应仍为 "arm64os" */
+        {
+            const char *expected = "arm64os";
+            const char *actual = init_uts_ns.nodename;
+            int match = 1;
+            int i;
+            for (i = 0; expected[i]; i++) {
+                if (actual[i] != expected[i]) {
+                    match = 0;
+                    break;
+                }
+            }
+            if (actual[i] != '\0')
+                match = 0;
+
+            if (match) {
+                boot_printk("[p10-test] UTS namespace: PASS\n");
+            } else {
+                boot_printk("[p10-test] FAIL: host hostname was modified\n");
+                return;
+            }
+        }
+
+        put_uts_ns(container_uts);
+    }
+
+    /* ============================================================
+     * Test 3: Mount namespace 隔离
+     *
+     * 创建新 mount namespace，添加挂载点，
+     * 验证新挂载点只在子 namespace 中可见。
+     * ============================================================
+     */
+    boot_printk("[p10-test] === Mount namespace test ===\n");
+    {
+        struct mnt_namespace *child_mnt;
+
+        /* 在初始 namespace 中添加一个挂载点 */
+        mnt_ns_add_mount(&init_mnt_ns, "/", "ramfs");
+
+        /* 创建子 mount namespace（从 init 复制） */
+        child_mnt = create_mnt_namespace(&init_mnt_ns);
+        if (!child_mnt) {
+            boot_printk("[p10-test] FAIL: create_mnt_namespace returned NULL\n");
+            return;
+        }
+
+        /* 子 namespace 应继承 "/" 挂载 */
+        if (!mnt_ns_has_mount(child_mnt, "/")) {
+            boot_printk("[p10-test] FAIL: child ns missing inherited mount\n");
+            return;
+        }
+
+        /* 在子 namespace 中添加独有挂载 */
+        mnt_ns_add_mount(child_mnt, "/container_data", "ramfs");
+
+        /* 验证隔离：父 namespace 不应看到 /container_data */
+        if (mnt_ns_has_mount(&init_mnt_ns, "/container_data")) {
+            boot_printk("[p10-test] FAIL: parent sees child-only mount\n");
+            return;
+        }
+
+        /* 子 namespace 应看到 /container_data */
+        if (mnt_ns_has_mount(child_mnt, "/container_data")) {
+            boot_printk("[p10-test] mount namespace: PASS\n");
+        } else {
+            boot_printk("[p10-test] FAIL: child ns missing its own mount\n");
+            return;
+        }
+
+        put_mnt_ns(child_mnt);
+    }
+
+    /* ============================================================
+     * Test 4: User namespace UID 映射
+     *
+     * 创建子 user namespace，设置 UID 映射：
+     *   容器 UID 0 → 宿主 UID 1000
+     * 验证映射翻译正确。
+     * ============================================================
+     */
+    boot_printk("[p10-test] === User namespace test ===\n");
+    {
+        struct user_namespace *child_userns;
+        int outer_uid;
+
+        /* 创建子 user namespace */
+        child_userns = create_user_namespace(&init_user_ns);
+        if (!child_userns) {
+            boot_printk("[p10-test] FAIL: create_user_namespace returned NULL\n");
+            return;
+        }
+
+        /* 设置 UID 映射：容器 UID 0-65535 → 宿主 UID 1000-66535 */
+        user_ns_set_uid_map(child_userns, 0, 1000, 65536);
+
+        /* 验证：容器 UID 0 (root) → 宿主 UID 1000 */
+        outer_uid = user_ns_map_uid(child_userns, 0);
+        boot_printk("[p10-test] Container UID 0 -> Host UID ");
+        boot_printk_hex((unsigned long)outer_uid);
+        boot_printk("\n");
+
+        if (outer_uid == 1000) {
+            /* 进一步验证：容器 UID 100 → 宿主 UID 1100 */
+            outer_uid = user_ns_map_uid(child_userns, 100);
+            if (outer_uid == 1100) {
+                boot_printk("[p10-test] user namespace: PASS\n");
+            } else {
+                boot_printk("[p10-test] FAIL: UID 100 mapped to ");
+                boot_printk_hex((unsigned long)outer_uid);
+                boot_printk(" (expected 1100)\n");
+                return;
+            }
+        } else {
+            boot_printk("[p10-test] FAIL: expected Host UID 1000\n");
+            return;
+        }
+
+        put_user_ns(child_userns);
+    }
+
+    /* ============================================================
+     * Test 5: nsproxy — 组合创建多个 namespace
+     *
+     * 模拟 clone(CLONE_NEWUTS | CLONE_NEWPID) 创建容器。
+     * ============================================================
+     */
+    boot_printk("[p10-test] === nsproxy combined test ===\n");
+    {
+        struct nsproxy *container_ns;
+        unsigned long flags = CLONE_NEWUTS | CLONE_NEWPID;
+
+        container_ns = create_nsproxy(&init_nsproxy, flags);
+        if (!container_ns) {
+            boot_printk("[p10-test] FAIL: create_nsproxy returned NULL\n");
+            return;
+        }
+
+        /* 验证新的 UTS namespace（不是 init_uts_ns） */
+        if (container_ns->uts_ns == &init_uts_ns) {
+            boot_printk("[p10-test] FAIL: uts_ns should be new\n");
+            return;
+        }
+
+        /* 验证新的 PID namespace */
+        if (container_ns->pid_ns_for_children == &init_pid_ns) {
+            boot_printk("[p10-test] FAIL: pid_ns should be new\n");
+            return;
+        }
+
+        /* 验证 MNT namespace 共享（未指定 CLONE_NEWNS） */
+        if (container_ns->mnt_ns != init_nsproxy.mnt_ns) {
+            boot_printk("[p10-test] FAIL: mnt_ns should be shared\n");
+            return;
+        }
+
+        boot_printk("[p10-test] nsproxy combined: PASS\n");
+        put_nsproxy(container_ns);
+    }
+
+    /* ============================================================
+     * Test 6: cgroup v2 — 内存控制器
+     *
+     * 创建子 cgroup，设置 memory.max=10MB，
+     * 尝试 charge 5MB（成功）和 20MB（失败），
+     * 验证内存限制生效。
+     * ============================================================
+     */
+    boot_printk("[p10-test] === cgroup memory test ===\n");
+    {
+        struct cgroup *test_cg;
+        int ret;
+
+        /* 创建子 cgroup */
+        test_cg = cgroup_create(&root_cgroup, "mem_test");
+        if (!test_cg) {
+            boot_printk("[p10-test] FAIL: cgroup_create returned NULL\n");
+            return;
+        }
+
+        /* 设置内存上限 10MB */
+        mem_cgroup_set_max(test_cg, 10 * 1024 * 1024);
+
+        /* 尝试 charge 5MB — 应该成功 */
+        ret = mem_cgroup_charge(test_cg, 5 * 1024 * 1024);
+        if (ret != 0) {
+            boot_printk("[p10-test] FAIL: 5MB charge should succeed\n");
+            return;
+        }
+
+        boot_printk("[p10-test] memory.current=");
+        boot_printk_hex(test_cg->memory_current);
+        boot_printk(" after 5MB charge\n");
+
+        /* 尝试 charge 另外 6MB — 应该失败（5+6=11 > 10） */
+        ret = mem_cgroup_charge(test_cg, 6 * 1024 * 1024);
+        if (ret == 0) {
+            boot_printk("[p10-test] FAIL: 6MB charge should fail (OOM)\n");
+            return;
+        }
+
+        boot_printk("[p10-test] 6MB charge correctly denied (OOM)\n");
+
+        /* 释放 3MB */
+        mem_cgroup_uncharge(test_cg, 3 * 1024 * 1024);
+
+        /* 现在 current=2MB，charge 另外 7MB 应该成功（2+7=9 < 10） */
+        ret = mem_cgroup_charge(test_cg, 7 * 1024 * 1024);
+        if (ret != 0) {
+            boot_printk("[p10-test] FAIL: 7MB charge after uncharge should succeed\n");
+            return;
+        }
+
+        boot_printk("[p10-test] cgroup memory: PASS\n");
+    }
+
+    /* ============================================================
+     * Test 7: cgroup v2 — PIDs 控制器
+     *
+     * 创建子 cgroup，设置 pids.max=2，
+     * attach 2 个进程（成功），第 3 个进程（拒绝）。
+     * ============================================================
+     */
+    boot_printk("[p10-test] === cgroup PIDs test ===\n");
+    {
+        struct cgroup *pids_cg;
+        struct task_struct fake_task1, fake_task2, fake_task3;
+        int ret;
+
+        /* 创建子 cgroup */
+        pids_cg = cgroup_create(&root_cgroup, "pids_test");
+        if (!pids_cg) {
+            boot_printk("[p10-test] FAIL: cgroup_create returned NULL\n");
+            return;
+        }
+
+        /* 设置 pids.max=2 */
+        pids_cgroup_set_max(pids_cg, 2);
+
+        /* 初始化 fake tasks */
+        fake_task1.cgroups = &init_css_set;
+        fake_task2.cgroups = &init_css_set;
+        fake_task3.cgroups = &init_css_set;
+
+        /* attach 第 1 个进程 — 应该成功 */
+        ret = cgroup_attach_task(pids_cg, &fake_task1);
+        if (ret != 0) {
+            boot_printk("[p10-test] FAIL: first attach should succeed\n");
+            return;
+        }
+
+        /* attach 第 2 个进程 — 应该成功 */
+        ret = cgroup_attach_task(pids_cg, &fake_task2);
+        if (ret != 0) {
+            boot_printk("[p10-test] FAIL: second attach should succeed\n");
+            return;
+        }
+
+        boot_printk("[p10-test] pids.current=");
+        boot_printk_hex((unsigned long)pids_cg->pids_current);
+        boot_printk(" after 2 attaches\n");
+
+        /* attach 第 3 个进程 — 应该被拒绝 */
+        ret = cgroup_attach_task(pids_cg, &fake_task3);
+        if (ret == 0) {
+            boot_printk("[p10-test] FAIL: third attach should be denied\n");
+            return;
+        }
+
+        boot_printk("[p10-test] third attach correctly denied\n");
+
+        /* detach 一个进程后应能再次 attach */
+        cgroup_detach_task(pids_cg, &fake_task1);
+
+        ret = cgroup_attach_task(pids_cg, &fake_task3);
+        if (ret != 0) {
+            boot_printk("[p10-test] FAIL: attach after detach should succeed\n");
+            return;
+        }
+
+        boot_printk("[p10-test] cgroup pids: PASS\n");
+    }
+
+    /* ============================================================
+     * Test 8: cgroup CPU 控制器（参数设置验证）
+     * ============================================================
+     */
+    boot_printk("[p10-test] === cgroup CPU test ===\n");
+    {
+        struct cgroup *cpu_cg;
+
+        cpu_cg = cgroup_create(&root_cgroup, "cpu_test");
+        if (!cpu_cg) {
+            boot_printk("[p10-test] FAIL: cgroup_create for cpu_test\n");
+            return;
+        }
+
+        /* 设置 CPU 配额 50%（50000us / 100000us） */
+        cpu_cgroup_set_max(cpu_cg, 50000, 100000);
+
+        /* 设置 CPU 权重 */
+        cpu_cgroup_set_weight(cpu_cg, 200);
+
+        /* 验证参数 */
+        if (cpu_cg->cpu_max_quota == 50000 &&
+            cpu_cg->cpu_max_period == 100000 &&
+            cpu_cg->cpu_weight == 200) {
+            boot_printk("[p10-test] cgroup cpu: PASS\n");
+        } else {
+            boot_printk("[p10-test] FAIL: CPU controller params mismatch\n");
+            return;
+        }
+    }
+
+    boot_printk("[BOOT] Phase 10 namespace + cgroup tests: all passed\n");
 }

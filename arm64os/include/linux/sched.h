@@ -20,6 +20,10 @@
  *
  * Phase 7 新增：
  *   - task_struct.files 字段：指向进程的文件描述符表
+ *
+ * Phase 10 新增：
+ *   - task_struct.nsproxy 字段：指向进程的 namespace 集合
+ *   - task_struct.cgroups 字段：指向进程的 cgroup 状态集合
  */
 
 #ifndef __LINUX_SCHED_H
@@ -147,10 +151,16 @@ struct sched_entity {
  * Phase 7 新增：
  *   - files：文件描述符表（NULL = 无文件系统访问）
  *
+ * Phase 10 新增：
+ *   - nsproxy：namespace 代理（NULL = 使用 init_nsproxy）
+ *   - cgroups：cgroup 状态集合（NULL = 使用 init_css_set）
+ *
  * 参考：include/linux/sched.h struct task_struct
  * ============================================================
  */
 struct files_struct;  /* 前向声明（定义在 include/linux/fs.h）*/
+struct nsproxy;       /* 前向声明（定义在 include/linux/nsproxy.h）*/
+struct css_set;       /* 前向声明（定义在 include/linux/cgroup.h）*/
 
 struct task_struct {
     volatile long       state;              /* TASK_RUNNING / TASK_DEAD */
@@ -161,6 +171,8 @@ struct task_struct {
     char                comm[16];           /* 进程名 */
     struct mm_struct   *mm;                 /* 内存描述符（Phase 5）*/
     struct files_struct *files;             /* 文件描述符表（Phase 7）*/
+    struct nsproxy     *nsproxy;            /* namespace 集合（Phase 10）*/
+    struct css_set     *cgroups;            /* cgroup 状态（Phase 10）*/
     struct sched_entity se;                 /* CFS 调度实体 */
     struct cpu_context  thread;             /* 上下文切换保存区 */
 };
@@ -171,7 +183,7 @@ struct task_struct {
  * 供 process.S 中 cpu_switch_to 使用。
  * 必须与 struct task_struct 的实际布局匹配。
  *
- * 计算方式（Phase 7 更新）：
+ * 计算方式（Phase 10 更新）：
  *   state:    8 bytes (long)
  *   flags:    8 bytes (unsigned long)
  *   stack:    8 bytes (pointer)
@@ -180,6 +192,8 @@ struct task_struct {
  *   comm:    16 bytes (char[16])
  *   mm:       8 bytes (pointer)       ← Phase 5 新增
  *   files:    8 bytes (pointer)       ← Phase 7 新增
+ *   nsproxy:  8 bytes (pointer)       ← Phase 10 新增
+ *   cgroups:  8 bytes (pointer)       ← Phase 10 新增
  *   se:       sched_entity size
  *     load_weight: 8 bytes
  *     rb_node: 24 bytes (3 × unsigned long)
@@ -189,9 +203,9 @@ struct task_struct {
  *     sum_exec_runtime: 8 bytes
  *   se total = 8 + 24 + 8 + 8 + 8 + 8 = 64 bytes
  *
- *   offset = 8 + 8 + 8 + 4 + 4 + 16 + 8 + 8 + 64 = 128
+ *   offset = 8 + 8 + 8 + 4 + 4 + 16 + 8 + 8 + 8 + 8 + 64 = 144
  */
-#define THREAD_CPU_CONTEXT  128
+#define THREAD_CPU_CONTEXT  144
 
 /*
  * TASK_MM_OFFSET - task_struct 中 mm 字段的偏移量

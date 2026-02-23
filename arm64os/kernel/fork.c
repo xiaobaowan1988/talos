@@ -138,6 +138,8 @@ struct task_struct *create_user_task(unsigned long pgd_phys,
     tsk->prio = 20;         /* nice=0 */
     tsk->mm = mm;
     tsk->files = NULL;      /* Phase 7：用户进程暂不分配 files_struct */
+    tsk->nsproxy = NULL;    /* Phase 10：继承 init_nsproxy */
+    tsk->cgroups = NULL;    /* Phase 10：继承 init_css_set */
 
     /* 设置进程名 */
     for (i = 0; i < 15 && name[i]; i++)

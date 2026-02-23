@@ -331,16 +331,19 @@ void test_namespaces(void) {
 
 ```
 arm64os/
-└── kernel/
-    ├── nsproxy.c          ← namespace代理（核心）
-    ├── pid_namespace.c    ← PID namespace
-    ├── user_namespace.c   ← User namespace（UID映射）
-    ├── utsname.c          ← UTS namespace
-    ├── cgroup/
-    │   ├── cgroup.c       ← cgroup v2核心（核心）
-    │   ├── cpu.c          ← CPU控制器
-    │   ├── memory.c       ← 内存控制器（核心）
-    │   └── pids.c         ← PID数量控制器
-    └── fs/
-        └── mount.c        ← Mount namespace（更新）
+├── include/linux/
+│   ├── nsproxy.h          ← namespace 结构定义（nsproxy + 各namespace类型）
+│   └── cgroup.h           ← cgroup v2 数据结构（cgroup + 控制器状态）
+├── kernel/
+│   ├── nsproxy.c          ← namespace代理（核心）
+│   ├── pid_namespace.c    ← PID namespace
+│   ├── user_namespace.c   ← User namespace（UID映射）
+│   ├── utsname.c          ← UTS namespace
+│   └── cgroup/
+│       ├── cgroup.c       ← cgroup v2核心（核心）
+│       ├── cpu.c          ← CPU控制器
+│       ├── memory.c       ← 内存控制器（核心）
+│       └── pids.c         ← PID数量控制器
+└── fs/
+    └── mount.c            ← Mount namespace
 ```

@@ -305,6 +305,8 @@ struct task_struct *kernel_thread_create(void (*fn)(void), const char *name,
     tsk->prio = nice + 20; /* nice → prio：nice=-20→prio=0, nice=0→prio=20 */
     tsk->mm = NULL;         /* 内核线程无用户地址空间 */
     tsk->files = NULL;      /* Phase 7：内核线程无文件描述符表 */
+    tsk->nsproxy = NULL;    /* Phase 10：继承 init_nsproxy */
+    tsk->cgroups = NULL;    /* Phase 10：继承 init_css_set */
 
     /* 设置进程名 */
     for (i = 0; i < 15 && name[i]; i++)
@@ -400,6 +402,8 @@ void sched_init(void)
     idle_task.prio = 39;     /* 最低优先级 */
     idle_task.mm = NULL;     /* 内核线程无用户地址空间 */
     idle_task.files = NULL;  /* Phase 7：idle 无文件描述符表 */
+    idle_task.nsproxy = NULL; /* Phase 10：idle 使用 init_nsproxy */
+    idle_task.cgroups = NULL; /* Phase 10：idle 使用 init_css_set */
     idle_task.comm[0] = 'i'; idle_task.comm[1] = 'd';
     idle_task.comm[2] = 'l'; idle_task.comm[3] = 'e';
     idle_task.comm[4] = '\0';

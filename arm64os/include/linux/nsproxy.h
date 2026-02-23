@@ -174,15 +174,22 @@ struct cgroup_namespace {
 
 /*
  * ============================================================
- * Network namespace — 占位（Phase 11 实现）
+ * Network namespace — Phase 11 实现
  *
  * 参考：include/net/net_namespace.h struct net
+ *
+ * Phase 11 新增：
+ *   - nf_hooks_ipv4[]：每个 netfilter Hook 点的钩子数组指针
+ *     5 个 Hook 点对应 NF_INET_PRE_ROUTING .. NF_INET_POST_ROUTING
  * ============================================================
  */
+struct nf_hook_entries;  /* 前向声明（定义在 include/linux/netfilter.h）*/
+
 struct net {
     int                 count;          /* 引用计数 */
     int                 ifindex;        /* 下一个接口索引 */
-    /* Phase 11 将添加：设备列表、路由表、iptables 等 */
+    /* Phase 11: netfilter Hook 点（每个 Hook 点一个 entries 指针）*/
+    struct nf_hook_entries *nf_hooks_ipv4[5];   /* NF_INET_NUMHOOKS = 5 */
 };
 
 /*

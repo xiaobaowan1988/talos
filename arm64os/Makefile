@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 10 构建系统
+# Phase 11 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2+3+4+5+6+7+8+9+10 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3+4+5+6+7+8+9+10+11 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -142,6 +142,16 @@ OBJS := \
     kernel/cgroup/cpu.o \
     kernel/cgroup/memory.o \
     kernel/cgroup/pids.o \
+    net/core/skbuff.o \
+    net/core/sock.o \
+    net/ipv4/af_inet.o \
+    net/ipv4/ip_input.o \
+    net/ipv4/ip_output.o \
+    net/ipv4/tcp.o \
+    net/ipv4/tcp_input.o \
+    net/ipv4/tcp_output.o \
+    net/netfilter/core.o \
+    net/netfilter/nf_tables_core.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -240,6 +250,18 @@ fs/overlayfs/%.o: fs/overlayfs/%.c
 
 # Phase 10: kernel/cgroup/ C 文件
 kernel/cgroup/%.o: kernel/cgroup/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 11: net/core/ C 文件
+net/core/%.o: net/core/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 11: net/ipv4/ C 文件
+net/ipv4/%.o: net/ipv4/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 11: net/netfilter/ C 文件
+net/netfilter/%.o: net/netfilter/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---- 编译 C 文件 ----
@@ -353,7 +375,7 @@ QEMU_TIMEOUT    ?= 30
 
 .PHONY: test
 test: check-qemu $(TARGET) $(DISK_IMG)
-	@echo "=== Running Phase 10 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@echo "=== Running Phase 11 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) $(QEMU) \
 	    $(QEMU_COMMON) \
 	    -nographic \
@@ -397,6 +419,11 @@ test: check-qemu $(TARGET) $(DISK_IMG)
 	@grep -q "cgroup memory: PASS"          /tmp/arm64os_test.log && echo "PASS: cgroup memory"                   || echo "FAIL: 'cgroup memory: PASS' not found"
 	@grep -q "cgroup pids: PASS"            /tmp/arm64os_test.log && echo "PASS: cgroup pids"                     || echo "FAIL: 'cgroup pids: PASS' not found"
 	@grep -q "Phase 10 complete"            /tmp/arm64os_test.log && echo "PASS: Phase 10 complete"               || echo "FAIL: 'Phase 10 complete' not found"
+	@grep -q "network init: PASS"           /tmp/arm64os_test.log && echo "PASS: network init"                    || echo "FAIL: 'network init: PASS' not found"
+	@grep -q "TCP loopback: PASS"           /tmp/arm64os_test.log && echo "PASS: TCP loopback"                    || echo "FAIL: 'TCP loopback: PASS' not found"
+	@grep -q "netfilter hook: PASS"         /tmp/arm64os_test.log && echo "PASS: netfilter hook"                  || echo "FAIL: 'netfilter hook: PASS' not found"
+	@grep -q "nftables rule: PASS"          /tmp/arm64os_test.log && echo "PASS: nftables rule"                   || echo "FAIL: 'nftables rule: PASS' not found"
+	@grep -q "Phase 11 complete"            /tmp/arm64os_test.log && echo "PASS: Phase 11 complete"               || echo "FAIL: 'Phase 11 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -439,7 +466,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 10 Build System"
+	@echo "arm64os Phase 11 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

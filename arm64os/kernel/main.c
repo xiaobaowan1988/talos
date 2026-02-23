@@ -70,6 +70,12 @@
  *   - 测试 cgroup 内存控制器：设置限制，验证超限拒绝
  *   - 测试 cgroup PIDs 控制器：设置限制，验证进程数限制
  *
+ * Phase 11 新增：
+ *   - net_init()：初始化网络子系统（sk_buff池、socket层、TCP、IPv4、netfilter）
+ *   - 测试 TCP loopback：创建服务端+客户端 socket，三次握手，数据收发
+ *   - 测试 netfilter：注册钩子丢弃特定协议包，验证 NF_DROP 生效
+ *   - 测试 nftables：添加规则匹配+过滤，验证规则引擎
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
@@ -78,6 +84,9 @@
 #include <linux/fs.h>
 #include <linux/nsproxy.h>
 #include <linux/cgroup.h>
+#include <linux/net.h>
+#include <linux/skbuff.h>
+#include <linux/netfilter.h>
 #include <asm/memory.h>
 
 /* 由 printk.c 提供 */
@@ -161,6 +170,12 @@ static void test_phase9(void);
 
 /* Phase 10：Namespace + cgroup v2（kernel/nsproxy.c, kernel/cgroup/） */
 static void test_phase10(void);
+
+/* Phase 11：TCP/IP + netfilter（net/） */
+/* net_init() 定义在 net.h，nf_init() 定义在 netfilter.h */
+void nft_init(void);
+void inet_init(void);
+static void test_phase11(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -319,7 +334,7 @@ void panic_unhandled(void)
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 10: Namespaces + cgroup v2\n");
+    boot_printk("[BOOT] Phase 11: TCP/IP + netfilter\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -548,7 +563,32 @@ void start_kernel(void)
 
     boot_printk("[BOOT] Phase 10 complete\n");
 
-    /* Phase 10 终态：调度器运行中，挂死 idle 进程 */
+    /* ---- Phase 11: TCP/IP 协议栈 + netfilter 框架 ---- */
+    /*
+     * Phase 11 初始化顺序：
+     *   1. skb_init() — 初始化 sk_buff 数据包缓冲池
+     *   2. sock_init() — 初始化 socket 池
+     *   3. nf_init() — 初始化 netfilter 钩子框架
+     *   4. nft_init() — 初始化 nftables 规则引擎
+     *   5. inet_init() — 初始化 IPv4 协议族（含 TCP + IP）
+     *   6. 运行验证测试：TCP loopback、netfilter、nftables
+     */
+    boot_printk("[BOOT] === Phase 11: TCP/IP + netfilter ===\n");
+
+    boot_printk("[BOOT] Initializing network stack...\n");
+    skb_init();
+    sock_init();
+    nf_init();
+    nft_init();
+    inet_init();
+    boot_printk("[net] network init: PASS\n");
+
+    /* 运行 Phase 11 测试 */
+    test_phase11();
+
+    boot_printk("[BOOT] Phase 11 complete\n");
+
+    /* Phase 11 终态：调度器运行中，挂死 idle 进程 */
     while (1)
         __asm__ volatile("wfi");
 }
@@ -1676,4 +1716,348 @@ static void test_phase10(void)
     }
 
     boot_printk("[BOOT] Phase 10 namespace + cgroup tests: all passed\n");
+}
+
+/*
+ * ============================================================
+ * Phase 11: TCP/IP + netfilter 验证
+ *
+ * 流程：
+ *   1. TCP loopback 测试：
+ *      a. 创建服务端 socket，绑定端口 8080，设置监听
+ *      b. 创建客户端 socket，连接 127.0.0.1:8080
+ *      c. TCP 三次握手通过 loopback 同步完成
+ *      d. 服务端 accept 获取连接
+ *      e. 服务端发送 "Hello TCP!\n"
+ *      f. 客户端读取数据，验证内容
+ *
+ *   2. netfilter 钩子测试：
+ *      a. 注册 NF_INET_LOCAL_IN 钩子（丢弃 ICMP 包）
+ *      b. 构造测试 skb（模拟 ICMP 包）
+ *      c. 调用 nf_hook() 验证返回 NF_DROP
+ *      d. 注销钩子
+ *
+ *   3. nftables 规则引擎测试：
+ *      a. 添加 DROP 规则到 INPUT 链
+ *      b. 构造测试 skb
+ *      c. 调用 nft_do_chain() 验证匹配
+ *
+ * 参考：Phase 11 设计文档 §11.8
+ * ============================================================
+ */
+
+/*
+ * test_netfilter_drop_hook - 测试用钩子函数
+ *
+ * 丢弃所有 ICMP 包（protocol == IPPROTO_ICMP）。
+ * 参考 §11.8 test_netfilter_drop()。
+ */
+static unsigned int test_netfilter_drop_hook(void *priv,
+                                              struct sk_buff *skb,
+                                              const struct nf_hook_state *state)
+{
+    struct iphdr *iph = skb->nh;
+    if (iph && iph->protocol == IPPROTO_ICMP)
+        return NF_DROP;
+    return NF_ACCEPT;
+}
+
+static void test_phase11(void)
+{
+    boot_printk("[BOOT] === Phase 11: TCP/IP + netfilter test ===\n");
+
+    /* ============================================================
+     * Test 1: TCP loopback — 三次握手 + 数据收发
+     *
+     * 参考：§11.4 TCP三次握手 + §11.8 test_tcp()
+     *
+     * 数据包路径（全部走 loopback）：
+     *   send → tcp_sendmsg → ip_queue_xmit → [LOCAL_OUT hook]
+     *   → loopback_xmit → ip_rcv → [PRE_ROUTING hook]
+     *   → ip_local_deliver → [LOCAL_IN hook] → tcp_v4_rcv
+     *   → socket 接收队列 → recv
+     * ============================================================
+     */
+    boot_printk("[p11-test] === TCP loopback test ===\n");
+    {
+        int server_fd, client_fd, conn_fd;
+        struct sockaddr_in addr;
+        char buf[32];
+        ssize_t n;
+        int i;
+
+        /* 创建服务端 socket */
+        boot_printk("[p11-test] Creating server socket...\n");
+        server_fd = sys_socket(AF_INET, SOCK_STREAM, 0);
+        if (server_fd < 0) {
+            boot_printk("[p11-test] FAIL: sys_socket(server)\n");
+            return;
+        }
+
+        /* 绑定到 0.0.0.0:8080 */
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(8080);
+        addr.sin_addr.s_addr = INADDR_ANY;
+        for (i = 0; i < 8; i++)
+            addr.sin_zero[i] = 0;
+
+        if (sys_bind(server_fd, &addr, sizeof(addr)) != 0) {
+            boot_printk("[p11-test] FAIL: sys_bind\n");
+            return;
+        }
+
+        /* 设置监听 */
+        if (sys_listen(server_fd, 5) != 0) {
+            boot_printk("[p11-test] FAIL: sys_listen\n");
+            return;
+        }
+        boot_printk("[p11-test] Server listening on port 8080\n");
+
+        /* 创建客户端 socket */
+        boot_printk("[p11-test] Creating client socket...\n");
+        client_fd = sys_socket(AF_INET, SOCK_STREAM, 0);
+        if (client_fd < 0) {
+            boot_printk("[p11-test] FAIL: sys_socket(client)\n");
+            return;
+        }
+
+        /* 连接到 127.0.0.1:8080（三次握手通过 loopback 同步完成）*/
+        boot_printk("[p11-test] Client connecting to 127.0.0.1:8080...\n");
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (sys_connect(client_fd, &addr, sizeof(addr)) != 0) {
+            boot_printk("[p11-test] FAIL: sys_connect\n");
+            return;
+        }
+        boot_printk("[p11-test] TCP handshake complete\n");
+
+        /* 服务端 accept 获取连接 */
+        boot_printk("[p11-test] Server accepting connection...\n");
+        conn_fd = sys_accept(server_fd, NULL, NULL);
+        if (conn_fd < 0) {
+            boot_printk("[p11-test] FAIL: sys_accept\n");
+            return;
+        }
+
+        /* 服务端发送数据 */
+        boot_printk("[p11-test] Writing data on server side...\n");
+        n = sock_write(conn_fd, "Hello TCP!\n", 11);
+        if (n != 11) {
+            boot_printk("[p11-test] FAIL: sock_write returned ");
+            boot_printk_hex((unsigned long)n);
+            boot_printk("\n");
+            return;
+        }
+
+        /* 客户端读取数据 */
+        boot_printk("[p11-test] Reading data on client side...\n");
+        for (i = 0; i < 32; i++)
+            buf[i] = 0;
+
+        n = sock_read(client_fd, buf, 16);
+        if (n != 11) {
+            boot_printk("[p11-test] FAIL: sock_read returned ");
+            boot_printk_hex((unsigned long)n);
+            boot_printk("\n");
+            return;
+        }
+
+        /* 验证内容 */
+        buf[11] = '\0';
+        if (buf[0] == 'H' && buf[1] == 'e' && buf[2] == 'l' &&
+            buf[3] == 'l' && buf[4] == 'o' && buf[5] == ' ' &&
+            buf[6] == 'T' && buf[7] == 'C' && buf[8] == 'P' &&
+            buf[9] == '!' && buf[10] == '\n') {
+            boot_printk("[p11-test] TCP test OK: ");
+            boot_printk(buf);
+            boot_printk("[p11-test] TCP loopback: PASS\n");
+        } else {
+            boot_printk("[p11-test] FAIL: TCP data mismatch, got: ");
+            boot_printk(buf);
+            boot_printk("\n");
+            return;
+        }
+    }
+
+    /* ============================================================
+     * Test 2: netfilter 钩子 — 注册 ICMP DROP 钩子
+     *
+     * 参考：§11.5 netfilter钩子框架 + §11.8 test_netfilter_drop()
+     *
+     * 注册一个 NF_INET_LOCAL_IN 钩子，丢弃 ICMP 包。
+     * 构造模拟 ICMP skb，验证 nf_hook() 返回 NF_DROP。
+     * 构造模拟 TCP skb，验证 nf_hook() 返回 NF_ACCEPT。
+     * ============================================================
+     */
+    boot_printk("[p11-test] === netfilter hook test ===\n");
+    {
+        struct nf_hook_ops ops;
+        struct sk_buff *test_skb;
+        struct iphdr *iph;
+        unsigned int verdict;
+
+        /* 注册 ICMP DROP 钩子 */
+        ops.hook = test_netfilter_drop_hook;
+        ops.priv = NULL;
+        ops.pf = NFPROTO_IPV4;
+        ops.hooknum = NF_INET_LOCAL_IN;
+        ops.priority = NF_IP_PRI_FIRST;
+
+        boot_printk("[p11-test] Registering ICMP drop hook...\n");
+        if (nf_register_net_hook(&init_net, &ops) != 0) {
+            boot_printk("[p11-test] FAIL: nf_register_net_hook\n");
+            return;
+        }
+        boot_printk("[p11-test] ICMP drop rule installed\n");
+
+        /* 构造模拟 ICMP 包 */
+        test_skb = alloc_skb(64);
+        if (!test_skb) {
+            boot_printk("[p11-test] FAIL: alloc_skb for ICMP test\n");
+            return;
+        }
+        skb_reserve(test_skb, 0);
+        iph = (struct iphdr *)skb_put(test_skb, IP_HDR_LEN);
+        iph->version_ihl = 0x45;
+        iph->protocol = IPPROTO_ICMP;
+        iph->saddr = htonl(INADDR_LOOPBACK);
+        iph->daddr = htonl(INADDR_LOOPBACK);
+        test_skb->nh = iph;
+
+        /* 验证 ICMP 包被 DROP */
+        verdict = nf_hook(&init_net, NF_INET_LOCAL_IN, test_skb);
+        if (verdict == NF_DROP) {
+            boot_printk("[p11-test] ICMP packet dropped: OK\n");
+        } else {
+            boot_printk("[p11-test] FAIL: ICMP not dropped\n");
+            kfree_skb(test_skb);
+            return;
+        }
+        kfree_skb(test_skb);
+
+        /* 构造模拟 TCP 包 — 应该 ACCEPT */
+        test_skb = alloc_skb(64);
+        if (!test_skb) {
+            boot_printk("[p11-test] FAIL: alloc_skb for TCP test\n");
+            return;
+        }
+        skb_reserve(test_skb, 0);
+        iph = (struct iphdr *)skb_put(test_skb, IP_HDR_LEN);
+        iph->version_ihl = 0x45;
+        iph->protocol = IPPROTO_TCP;
+        iph->saddr = htonl(INADDR_LOOPBACK);
+        iph->daddr = htonl(INADDR_LOOPBACK);
+        test_skb->nh = iph;
+
+        verdict = nf_hook(&init_net, NF_INET_LOCAL_IN, test_skb);
+        if (verdict == NF_ACCEPT) {
+            boot_printk("[p11-test] TCP packet accepted: OK\n");
+        } else {
+            boot_printk("[p11-test] FAIL: TCP packet not accepted\n");
+            kfree_skb(test_skb);
+            return;
+        }
+        kfree_skb(test_skb);
+
+        /* 注销钩子 */
+        nf_unregister_net_hook(&init_net, &ops);
+
+        boot_printk("[p11-test] netfilter hook: PASS\n");
+    }
+
+    /* ============================================================
+     * Test 3: nftables 规则引擎 — 添加 DROP 规则
+     *
+     * 参考：§11.6 iptables/nftables规则匹配
+     *
+     * 在 INPUT 链添加一条规则：丢弃目的端口 9999 的 TCP 包。
+     * 验证匹配包被 DROP，不匹配包走默认策略 ACCEPT。
+     * ============================================================
+     */
+    boot_printk("[p11-test] === nftables rule test ===\n");
+    {
+        struct nft_rule rule;
+        struct sk_buff *test_skb;
+        struct iphdr *iph;
+        struct tcphdr *th;
+        unsigned int verdict;
+
+        /* 创建规则：DROP 目的端口 9999 的 TCP 包 */
+        rule.src_ip = 0;
+        rule.src_mask = 0;
+        rule.dst_ip = 0;
+        rule.dst_mask = 0;
+        rule.protocol = IPPROTO_TCP;
+        rule.src_port = 0;
+        rule.dst_port = htons(9999);
+        rule.target = NF_DROP;
+        rule.used = 0;
+
+        if (nft_add_rule(&nft_filter_table.input, &rule) != 0) {
+            boot_printk("[p11-test] FAIL: nft_add_rule\n");
+            return;
+        }
+
+        /* 构造匹配包（目的端口 9999）*/
+        test_skb = alloc_skb(128);
+        if (!test_skb) {
+            boot_printk("[p11-test] FAIL: alloc_skb for nft test\n");
+            return;
+        }
+        skb_reserve(test_skb, 0);
+        iph = (struct iphdr *)skb_put(test_skb, IP_HDR_LEN);
+        iph->version_ihl = 0x45;
+        iph->protocol = IPPROTO_TCP;
+        iph->saddr = htonl(INADDR_LOOPBACK);
+        iph->daddr = htonl(INADDR_LOOPBACK);
+        test_skb->nh = iph;
+
+        th = (struct tcphdr *)skb_put(test_skb, TCP_HDR_LEN);
+        th->source = htons(12345);
+        th->dest = htons(9999);
+        test_skb->th = th;
+
+        /* 评估规则链 — 应 DROP */
+        verdict = nft_do_chain(&nft_filter_table.input, test_skb);
+        if (verdict == NF_DROP) {
+            boot_printk("[p11-test] nft: port 9999 dropped: OK\n");
+        } else {
+            boot_printk("[p11-test] FAIL: nft did not drop port 9999\n");
+            kfree_skb(test_skb);
+            return;
+        }
+        kfree_skb(test_skb);
+
+        /* 构造不匹配包（目的端口 80）— 应走默认策略 ACCEPT */
+        test_skb = alloc_skb(128);
+        if (!test_skb) {
+            boot_printk("[p11-test] FAIL: alloc_skb for nft test 2\n");
+            return;
+        }
+        skb_reserve(test_skb, 0);
+        iph = (struct iphdr *)skb_put(test_skb, IP_HDR_LEN);
+        iph->version_ihl = 0x45;
+        iph->protocol = IPPROTO_TCP;
+        iph->saddr = htonl(INADDR_LOOPBACK);
+        iph->daddr = htonl(INADDR_LOOPBACK);
+        test_skb->nh = iph;
+
+        th = (struct tcphdr *)skb_put(test_skb, TCP_HDR_LEN);
+        th->source = htons(12345);
+        th->dest = htons(80);
+        test_skb->th = th;
+
+        verdict = nft_do_chain(&nft_filter_table.input, test_skb);
+        if (verdict == NF_ACCEPT) {
+            boot_printk("[p11-test] nft: port 80 accepted: OK\n");
+        } else {
+            boot_printk("[p11-test] FAIL: nft dropped port 80\n");
+            kfree_skb(test_skb);
+            return;
+        }
+        kfree_skb(test_skb);
+
+        boot_printk("[p11-test] nftables rule: PASS\n");
+    }
+
+    boot_printk("[BOOT] Phase 11 TCP/IP + netfilter tests: all passed\n");
 }

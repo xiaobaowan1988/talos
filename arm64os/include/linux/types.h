@@ -53,4 +53,9 @@ typedef int bool;
 /* 内联 / const / volatile 辅助宏 */
 #define __iomem     volatile        /* MMIO 内存访问标记 */
 
+/* 网络字节序类型（Phase 11：大端标记类型）*/
+typedef u16 __be16;
+typedef u32 __be32;
+typedef u32 __wsum;
+
 #endif /* __LINUX_TYPES_H */

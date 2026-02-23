@@ -17,6 +17,9 @@
  * Phase 5 新增：
  *   - struct mm_struct：简化版内存描述符（用户页表）
  *   - task_struct.mm 字段：指向进程的用户地址空间
+ *
+ * Phase 7 新增：
+ *   - task_struct.files 字段：指向进程的文件描述符表
  */
 
 #ifndef __LINUX_SCHED_H
@@ -141,9 +144,14 @@ struct sched_entity {
  * Phase 5 新增：
  *   - mm：内存描述符（NULL = 内核线程，非NULL = 用户进程）
  *
+ * Phase 7 新增：
+ *   - files：文件描述符表（NULL = 无文件系统访问）
+ *
  * 参考：include/linux/sched.h struct task_struct
  * ============================================================
  */
+struct files_struct;  /* 前向声明（定义在 include/linux/fs.h）*/
+
 struct task_struct {
     volatile long       state;              /* TASK_RUNNING / TASK_DEAD */
     unsigned long       flags;              /* TIF_NEED_RESCHED 等 */
@@ -152,6 +160,7 @@ struct task_struct {
     int                 prio;               /* 优先级 = nice + 20 (0-39) */
     char                comm[16];           /* 进程名 */
     struct mm_struct   *mm;                 /* 内存描述符（Phase 5）*/
+    struct files_struct *files;             /* 文件描述符表（Phase 7）*/
     struct sched_entity se;                 /* CFS 调度实体 */
     struct cpu_context  thread;             /* 上下文切换保存区 */
 };
@@ -162,7 +171,7 @@ struct task_struct {
  * 供 process.S 中 cpu_switch_to 使用。
  * 必须与 struct task_struct 的实际布局匹配。
  *
- * 计算方式（Phase 5 更新）：
+ * 计算方式（Phase 7 更新）：
  *   state:    8 bytes (long)
  *   flags:    8 bytes (unsigned long)
  *   stack:    8 bytes (pointer)
@@ -170,6 +179,7 @@ struct task_struct {
  *   prio:     4 bytes (int)
  *   comm:    16 bytes (char[16])
  *   mm:       8 bytes (pointer)       ← Phase 5 新增
+ *   files:    8 bytes (pointer)       ← Phase 7 新增
  *   se:       sched_entity size
  *     load_weight: 8 bytes
  *     rb_node: 24 bytes (3 × unsigned long)
@@ -179,9 +189,9 @@ struct task_struct {
  *     sum_exec_runtime: 8 bytes
  *   se total = 8 + 24 + 8 + 8 + 8 + 8 = 64 bytes
  *
- *   offset = 8 + 8 + 8 + 4 + 4 + 16 + 8 + 64 = 120
+ *   offset = 8 + 8 + 8 + 4 + 4 + 16 + 8 + 8 + 64 = 128
  */
-#define THREAD_CPU_CONTEXT  120
+#define THREAD_CPU_CONTEXT  128
 
 /*
  * TASK_MM_OFFSET - task_struct 中 mm 字段的偏移量

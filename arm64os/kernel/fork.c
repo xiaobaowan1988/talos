@@ -137,6 +137,7 @@ struct task_struct *create_user_task(unsigned long pgd_phys,
     tsk->pid = next_user_pid++;
     tsk->prio = 20;         /* nice=0 */
     tsk->mm = mm;
+    tsk->files = NULL;      /* Phase 7：用户进程暂不分配 files_struct */
 
     /* 设置进程名 */
     for (i = 0; i < 15 && name[i]; i++)

@@ -13,13 +13,23 @@
  *   - sys_write()：fd=1 时输出到 UART（最小化 write）
  *   - sys_exit()：标记进程为 TASK_DEAD 并调用 schedule()
  *
+ * Phase 7 新增：
+ *   - sys_openat()：通过 VFS 打开/创建文件
+ *   - sys_close()：通过 VFS 关闭文件描述符
+ *   - sys_read()：通过 VFS 读取文件
+ *   - sys_write() 更新：fd=1/2 仍输出 UART，其他 fd 走 VFS
+ *
  * 系统调用号使用 ARM64 Linux 标准编号（asm-generic/unistd.h）：
- *   __NR_write = 64
- *   __NR_exit  = 93
+ *   __NR_openat = 56
+ *   __NR_close  = 57
+ *   __NR_read   = 63
+ *   __NR_write  = 64
+ *   __NR_exit   = 93
  */
 
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/fs.h>
 
 /* ---- 错误码（简化版）---- */
 #define ENOSYS      38      /* 无效系统调用号 */
@@ -27,15 +37,15 @@
 #define EFAULT      14      /* 错误的地址 */
 
 /* ---- 系统调用号（ARM64 Linux ABI）---- */
+#define __NR_openat     56
+#define __NR_close      57
+#define __NR_read       63
 #define __NR_write      64
 #define __NR_exit       93
 #define NR_SYSCALLS     256     /* 系统调用表大小 */
 
 /*
  * pt_regs 结构体布局（与 entry.S 和 main.c 中的定义一致）
- *
- * 注意：此处前向声明，实际定义在 main.c 中。
- * Phase 5 通过 regs->regs[N] 访问各寄存器的值。
  */
 struct pt_regs {
     unsigned long regs[31];     /* x0-x30 */
@@ -51,12 +61,120 @@ void boot_printk_hex(unsigned long val);
 extern struct task_struct *current_task;
 void schedule(void);
 
+/* VFS 接口（fs/vfs/file.c） */
+int do_sys_open(struct files_struct *files, const char *pathname,
+                int flags, unsigned int mode);
+int do_sys_close(struct files_struct *files, int fd);
+ssize_t vfs_read(struct file *filp, char *buf, size_t count);
+ssize_t vfs_write(struct file *filp, const char *buf, size_t count);
+struct file *fget(struct files_struct *files, int fd);
+
+/* 全局初始文件描述符表 */
+extern struct files_struct init_files;
+
+/*
+ * ============================================================
+ * sys_openat - openat 系统调用
+ *
+ * 参数（ARM64 ABI）：
+ *   x0 = dirfd（AT_FDCWD = -100 表示相对于当前目录）
+ *   x1 = pathname（用户态路径字符串地址）
+ *   x2 = flags（O_RDONLY, O_WRONLY, O_CREAT 等）
+ *   x3 = mode（创建权限，仅 O_CREAT 时有效）
+ *
+ * 返回值：文件描述符（>= 0），或负数错误码。
+ *
+ * Phase 7 简化：忽略 dirfd，仅支持绝对路径。
+ *
+ * 参考：fs/open.c sys_openat()
+ * ============================================================
+ */
+static long sys_openat(struct pt_regs *regs)
+{
+    /* int dirfd = (int)regs->regs[0]; */  /* Phase 7: 忽略 */
+    const char *pathname = (const char *)regs->regs[1];
+    int flags            = (int)regs->regs[2];
+    unsigned int mode    = (unsigned int)regs->regs[3];
+    struct files_struct *files;
+
+    if (!pathname)
+        return -(long)EFAULT;
+
+    /* 获取当前进程的文件描述符表 */
+    files = current_task->files;
+    if (!files)
+        files = &init_files;
+
+    return (long)do_sys_open(files, pathname, flags, mode);
+}
+
+/*
+ * ============================================================
+ * sys_close - close 系统调用
+ *
+ * 参数：
+ *   x0 = fd
+ *
+ * 返回 0 成功，负数错误码。
+ *
+ * 参考：fs/open.c sys_close()
+ * ============================================================
+ */
+static long sys_close(struct pt_regs *regs)
+{
+    int fd = (int)regs->regs[0];
+    struct files_struct *files;
+
+    files = current_task->files;
+    if (!files)
+        files = &init_files;
+
+    return (long)do_sys_close(files, fd);
+}
+
+/*
+ * ============================================================
+ * sys_read - read 系统调用
+ *
+ * 参数：
+ *   x0 = fd
+ *   x1 = buf（用户态缓冲区地址）
+ *   x2 = count
+ *
+ * 返回实际读取的字节数，或负数错误码。
+ *
+ * 参考：fs/read_write.c ksys_read()
+ * ============================================================
+ */
+static long sys_read(struct pt_regs *regs)
+{
+    int fd          = (int)regs->regs[0];
+    char *buf       = (char *)regs->regs[1];
+    size_t count    = (size_t)regs->regs[2];
+    struct files_struct *files;
+    struct file *filp;
+
+    if (!buf)
+        return -(long)EFAULT;
+
+    files = current_task->files;
+    if (!files)
+        files = &init_files;
+
+    filp = fget(files, fd);
+    if (!filp)
+        return -(long)EBADF;
+
+    return (long)vfs_read(filp, buf, count);
+}
+
 /*
  * ============================================================
  * sys_write - write 系统调用
  *
- * 简化版：仅支持 fd=1（stdout）→ PL011 UART 输出。
- * 不支持其他文件描述符（Phase 7 VFS 后完善）。
+ * Phase 7 更新：
+ *   - fd=1/2（stdout/stderr）：直接输出到 UART（保持 Phase 5 行为）
+ *   - 其他 fd：通过 VFS 写入
  *
  * 参数（ARM64 ABI）：
  *   x0 = fd
@@ -74,24 +192,34 @@ static long sys_write(struct pt_regs *regs)
     const char *buf     = (const char *)regs->regs[1];
     size_t count        = (size_t)regs->regs[2];
     size_t i;
-
-    /* Phase 5：仅支持 stdout（fd=1）和 stderr（fd=2）*/
-    if (fd != 1 && fd != 2)
-        return -(long)EBADF;
+    struct files_struct *files;
+    struct file *filp;
 
     /* 安全检查：buf 不能为 NULL */
     if (!buf)
         return -(long)EFAULT;
 
-    /* 逐字符输出到 UART */
-    for (i = 0; i < count; i++) {
-        char c = buf[i];
-        if (c == '\0')
-            break;
-        boot_printk_char(c);
+    /* stdout/stderr：直接输出到 UART（保持 Phase 5 兼容）*/
+    if (fd == 1 || fd == 2) {
+        for (i = 0; i < count; i++) {
+            char c = buf[i];
+            if (c == '\0')
+                break;
+            boot_printk_char(c);
+        }
+        return (long)i;
     }
 
-    return (long)i;
+    /* 其他 fd：通过 VFS */
+    files = current_task->files;
+    if (!files)
+        files = &init_files;
+
+    filp = fget(files, fd);
+    if (!filp)
+        return -(long)EBADF;
+
+    return (long)vfs_write(filp, buf, count);
 }
 
 /*
@@ -99,10 +227,9 @@ static long sys_write(struct pt_regs *regs)
  * sys_exit - exit 系统调用
  *
  * 终止当前进程：标记为 TASK_DEAD，调用 schedule() 切换走。
- * 不释放资源（Phase 5 简化版，无需清理页表等）。
  *
  * 参数：
- *   x0 = status（退出码，Phase 5 忽略）
+ *   x0 = status（退出码）
  *
  * 不返回。
  *
@@ -133,12 +260,17 @@ static long sys_exit(struct pt_regs *regs)
  * 函数指针数组，索引 = 系统调用号。
  * NULL 表示未实现（返回 -ENOSYS）。
  *
+ * Phase 7 新增：openat(56), close(57), read(63)
+ *
  * 参考：arch/arm64/kernel/syscall.c sys_call_table[]
  * ============================================================
  */
 typedef long (*syscall_fn_t)(struct pt_regs *);
 
 static const syscall_fn_t sys_call_table[NR_SYSCALLS] = {
+    [__NR_openat]   = sys_openat,
+    [__NR_close]    = sys_close,
+    [__NR_read]     = sys_read,
     [__NR_write]    = sys_write,
     [__NR_exit]     = sys_exit,
     /* 其他调用号默认为 NULL → -ENOSYS */

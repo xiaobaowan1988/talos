@@ -280,13 +280,40 @@ void test_vfs(void) {
 
 ```
 arm64os/
-└── fs/
-    ├── vfs/
-    │   ├── super.c      ← 超级块管理（核心）
-    │   ├── inode.c      ← inode管理与缓存
-    │   ├── dcache.c     ← dentry缓存（核心）
-    │   ├── file.c       ← 文件对象与fd表
-    │   └── namei.c      ← 路径名解析
-    └── ramfs/
-        └── ramfs.c      ← 最简内存文件系统（用于测试）
+├── include/linux/
+│   └── fs.h             ← VFS四大对象数据结构 + 操作集 + 文件系统类型
+├── fs/
+│   ├── vfs/
+│   │   ├── super.c      ← 超级块管理、文件系统注册、挂载（核心）
+│   │   ├── inode.c      ← inode分配与引用计数管理
+│   │   ├── dcache.c     ← dentry缓存 hash 表、d_lookup（核心）
+│   │   ├── file.c       ← 文件对象、fd表、do_sys_open/close/vfs_read/write
+│   │   └── namei.c      ← 路径名解析（walk_component, path_lookup）
+│   └── ramfs/
+│       └── ramfs.c      ← 最简内存文件系统（用于测试）
+├── kernel/
+│   └── syscall/
+│       └── syscall.c    ← 更新：新增 openat/close/read 系统调用
+└── (已有文件更新)
+    ├── include/linux/sched.h  ← task_struct 新增 files 字段
+    ├── arch/arm64/kernel/process.S ← THREAD_CPU_CONTEXT 120→128
+    └── kernel/main.c         ← 新增 VFS 初始化与 test_vfs()
 ```
+
+## 7.10 实现简化说明
+
+以上 §7.2-§7.7 中的数据结构和算法为 Linux 内核的**参考设计**。
+Phase 7 实际实现为教学简化版，主要简化如下：
+
+| 项目 | Linux 内核 | Phase 7 实现 |
+|------|-----------|-------------|
+| 内存分配 | slab/kmalloc | 静态池（super×4, inode×128, dentry×256, file×64）|
+| dcache hash | hlist_bl + RCU | list_head 双向链表（256 桶）|
+| 并发保护 | spinlock + RCU + seqlock | 无锁（单 CPU，无 SMP）|
+| 引用计数 | atomic_t | 普通 int |
+| dentry 回收 | LRU 链表 + shrink | 不回收（未使用 dentry 保留在 dcache）|
+| inode 字段 | uid/gid/atime/mtime/blocks 等 | 仅 ino/mode/size/i_op/i_fop |
+| file 对象 | f_path(dentry+vfsmount) | f_dentry + f_inode |
+| ramfs 容量 | page cache（无限） | 单页 4KB/文件 |
+| 路径解析 | 支持 symlink/mount 穿越/".." | 仅绝对路径 + "." + ".." |
+| 系统调用 | 完整的 openat/read/write/close | fd=1/2 仍走 UART，其余走 VFS |

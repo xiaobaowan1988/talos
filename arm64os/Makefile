@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 6 构建系统
+# Phase 7 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2+3+4+5+6 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3+4+5+6+7 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -112,6 +112,12 @@ OBJS := \
     drivers/virtio/virtio_ring.o \
     drivers/block/virtio_blk.o \
     drivers/net/virtio_net.o \
+    fs/vfs/super.o \
+    fs/vfs/inode.o \
+    fs/vfs/dcache.o \
+    fs/vfs/file.o \
+    fs/vfs/namei.o \
+    fs/ramfs/ramfs.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -186,6 +192,14 @@ kernel/syscall/%.o: kernel/syscall/%.c
 
 # Phase 5: fs/ C 文件
 fs/%.o: fs/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 7: fs/vfs/ C 文件
+fs/vfs/%.o: fs/vfs/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 7: fs/ramfs/ C 文件
+fs/ramfs/%.o: fs/ramfs/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---- 编译 C 文件 ----
@@ -299,7 +313,7 @@ QEMU_TIMEOUT    ?= 30
 
 .PHONY: test
 test: check-qemu $(TARGET) $(DISK_IMG)
-	@echo "=== Running Phase 6 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@echo "=== Running Phase 7 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) $(QEMU) \
 	    $(QEMU_COMMON) \
 	    -nographic \
@@ -323,6 +337,11 @@ test: check-qemu $(TARGET) $(DISK_IMG)
 	@grep -q "write+read verify: PASS"        /tmp/arm64os_test.log && echo "PASS: VirtIO blk write+read verify"   || echo "FAIL: 'write+read verify: PASS' not found"
 	@grep -q "VirtIO net init OK"             /tmp/arm64os_test.log && echo "PASS: VirtIO net init OK"             || echo "FAIL: 'VirtIO net init OK' not found"
 	@grep -q "Phase 6 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 6 complete"               || echo "FAIL: 'Phase 6 complete' not found"
+	@grep -q "VFS initialized"                /tmp/arm64os_test.log && echo "PASS: VFS initialized"                || echo "FAIL: 'VFS initialized' not found"
+	@grep -q "ramfs mounted"                  /tmp/arm64os_test.log && echo "PASS: ramfs mounted"                  || echo "FAIL: 'ramfs mounted' not found"
+	@grep -q "VFS test OK"                    /tmp/arm64os_test.log && echo "PASS: VFS test OK"                    || echo "FAIL: 'VFS test OK' not found"
+	@grep -q "dcache hit: PASS"               /tmp/arm64os_test.log && echo "PASS: dcache hit"                     || echo "FAIL: 'dcache hit: PASS' not found"
+	@grep -q "Phase 7 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 7 complete"               || echo "FAIL: 'Phase 7 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -365,7 +384,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 6 Build System"
+	@echo "arm64os Phase 7 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

@@ -12,7 +12,7 @@
  *   恢复 next 的寄存器，跳转到 next 的恢复点。
  *
  * Phase 5 更新：
- *   THREAD_CPU_CONTEXT 从 112 → 120（task_struct 新增 mm 字段）
+ *   THREAD_CPU_CONTEXT 从 112 → 120（Phase 5：新增 mm 字段）→ 128（Phase 7：新增 files 字段）
  *
  * struct cpu_context 布局（来自 include/linux/sched.h）：
  *   offset  0: x19
@@ -29,16 +29,16 @@
  *   offset 88: sp
  *   offset 96: pc  (返回地址)
  *
- * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread) = 120
- *   计算（Phase 5）：state(8) + flags(8) + stack(8) + pid(4) + prio(4) +
- *         comm(16) + mm(8) + sched_entity(64) = 120
+ * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread) = 128
+ *   计算（Phase 7）：state(8) + flags(8) + stack(8) + pid(4) + prio(4) +
+ *         comm(16) + mm(8) + files(8) + sched_entity(64) = 128
  */
 
 /*
  * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread)
- * Phase 5 更新：从 112 → 120（新增 mm 指针 8 字节）
+ * Phase 7 更新：从 120 → 128（新增 files 指针 8 字节）
  */
-#define THREAD_CPU_CONTEXT  120
+#define THREAD_CPU_CONTEXT  128
 
 /*
  * TASK_MM_OFFSET = offsetof(struct task_struct, mm)

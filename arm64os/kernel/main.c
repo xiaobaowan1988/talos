@@ -38,11 +38,18 @@
  *   - test_virtio_blk()：读写块设备验证
  *   - test_virtio_net()：网络设备初始化验证
  *
+ * Phase 7 新增：
+ *   - vfs_init()：初始化 VFS 子系统（dcache, inode, file 池）
+ *   - ramfs_init()：注册 ramfs 文件系统
+ *   - do_mount()：挂载 ramfs 到根目录
+ *   - test_vfs()：创建文件、写入、读取、验证 dcache 命中
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/fs.h>
 #include <asm/memory.h>
 
 /* 由 printk.c 提供 */
@@ -99,6 +106,18 @@ int virtio_blk_init(void);
 int virtio_net_init(void);
 void test_virtio_blk(void);
 void test_virtio_net(void);
+
+/* Phase 7：VFS + dentry 缓存（fs/vfs/, fs/ramfs/） */
+void vfs_init(void);
+void ramfs_init(void);
+int do_sys_open(struct files_struct *files, const char *pathname,
+                int flags, unsigned int mode);
+int do_sys_close(struct files_struct *files, int fd);
+ssize_t vfs_read(struct file *filp, char *buf, size_t count);
+ssize_t vfs_write(struct file *filp, const char *buf, size_t count);
+struct file *fget(struct files_struct *files, int fd);
+extern struct files_struct init_files;
+static void test_vfs(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -257,7 +276,7 @@ void panic_unhandled(void)
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 6: VirtIO drivers\n");
+    boot_printk("[BOOT] Phase 7: VFS + dentry cache\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -400,7 +419,31 @@ void start_kernel(void)
 
     boot_printk("[BOOT] Phase 6 complete\n");
 
-    /* Phase 6 终态：调度器运行中，挂死 idle 进程 */
+    /* ---- Phase 7: VFS + dentry 缓存 ---- */
+    /*
+     * VFS 初始化顺序：
+     *   1. vfs_init() — 初始化 dcache hash 表、inode 池、file 池
+     *   2. ramfs_init() — 注册 ramfs 文件系统类型
+     *   3. do_mount() — 挂载 ramfs 到 /（根文件系统）
+     *   4. test_vfs() — 验证文件创建/读写/dcache 命中
+     */
+    boot_printk("[BOOT] === Phase 7: VFS + dentry cache ===\n");
+
+    boot_printk("[BOOT] Initializing VFS...\n");
+    vfs_init();
+
+    boot_printk("[BOOT] Registering ramfs...\n");
+    ramfs_init();
+
+    boot_printk("[BOOT] Mounting root filesystem (ramfs)...\n");
+    do_mount("none", "/", "ramfs", 0, NULL);
+
+    /* Phase 7: 验证 VFS */
+    test_vfs();
+
+    boot_printk("[BOOT] Phase 7 complete\n");
+
+    /* Phase 7 终态：调度器运行中，挂死 idle 进程 */
     while (1)
         __asm__ volatile("wfi");
 }
@@ -529,4 +572,208 @@ static void test_user_process(void)
     }
 
     boot_printk("[BOOT] WARNING: user init did not exit in time\n");
+}
+
+/*
+ * ============================================================
+ * Phase 7: VFS 验证
+ *
+ * 流程：
+ *   1. 通过 VFS 创建 /test.txt 文件
+ *   2. 写入 "hello vfs\n"
+ *   3. 关闭文件
+ *   4. 重新打开并读取
+ *   5. 验证内容正确
+ *   6. 再次打开同一文件 — 验证 dcache 命中
+ *   7. 创建子目录 /subdir 并在其中创建文件
+ *
+ * 参考：Phase 7 设计文档 §7.8 验证方法
+ * ============================================================
+ */
+static int vfs_str_equal(const char *a, const char *b, size_t len)
+{
+    size_t i;
+    for (i = 0; i < len; i++) {
+        if (a[i] != b[i])
+            return 0;
+    }
+    return 1;
+}
+
+static void test_vfs(void)
+{
+    int fd;
+    int fd2;
+    char buf[32];
+    ssize_t nread;
+    ssize_t nwrite;
+    struct file *filp;
+    int i;
+
+    boot_printk("[BOOT] === Phase 7: VFS test ===\n");
+
+    /* --- Test 1: 创建并写入文件 --- */
+    boot_printk("[vfs-test] Creating /test.txt...\n");
+    fd = do_sys_open(&init_files, "/test.txt", O_CREAT | O_WRONLY, 0644);
+    if (fd < 0) {
+        boot_printk("[vfs-test] FAIL: open(/test.txt, O_CREAT) returned ");
+        boot_printk_hex((unsigned long)fd);
+        boot_printk("\n");
+        return;
+    }
+    boot_printk("[vfs-test] fd=");
+    boot_printk_hex((unsigned long)fd);
+    boot_printk("\n");
+
+    /* 写入数据 */
+    filp = fget(&init_files, fd);
+    if (!filp) {
+        boot_printk("[vfs-test] FAIL: fget returned NULL\n");
+        return;
+    }
+    nwrite = vfs_write(filp, "hello vfs\n", 10);
+    boot_printk("[vfs-test] write returned ");
+    boot_printk_hex((unsigned long)nwrite);
+    boot_printk("\n");
+
+    if (nwrite != 10) {
+        boot_printk("[vfs-test] FAIL: expected write 10 bytes\n");
+        return;
+    }
+
+    /* 关闭文件 */
+    do_sys_close(&init_files, fd);
+
+    /* --- Test 2: 重新打开并读取 --- */
+    boot_printk("[vfs-test] Reopening /test.txt for read...\n");
+    fd = do_sys_open(&init_files, "/test.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        boot_printk("[vfs-test] FAIL: open(/test.txt, O_RDONLY) returned ");
+        boot_printk_hex((unsigned long)fd);
+        boot_printk("\n");
+        return;
+    }
+
+    /* 读取数据 */
+    filp = fget(&init_files, fd);
+    if (!filp) {
+        boot_printk("[vfs-test] FAIL: fget returned NULL for read\n");
+        return;
+    }
+
+    /* 清零缓冲区 */
+    for (i = 0; i < 32; i++)
+        buf[i] = 0;
+
+    nread = vfs_read(filp, buf, 16);
+    boot_printk("[vfs-test] read returned ");
+    boot_printk_hex((unsigned long)nread);
+    boot_printk("\n");
+
+    if (nread != 10) {
+        boot_printk("[vfs-test] FAIL: expected read 10 bytes, got ");
+        boot_printk_hex((unsigned long)nread);
+        boot_printk("\n");
+        return;
+    }
+
+    /* 验证内容 */
+    if (vfs_str_equal(buf, "hello vfs\n", 10)) {
+        boot_printk("[vfs-test] VFS test OK: ");
+        /* 安全输出内容（不含换行后的垃圾）*/
+        buf[10] = '\0';
+        boot_printk(buf);
+    } else {
+        boot_printk("[vfs-test] FAIL: content mismatch\n");
+        return;
+    }
+
+    do_sys_close(&init_files, fd);
+
+    /* --- Test 3: dcache 命中验证 --- */
+    /*
+     * 再次打开 /test.txt — 此时 dentry 已在 dcache 中。
+     * 路径解析应该直接命中 dcache（快速路径），
+     * 不需要调用文件系统的 lookup 回调。
+     */
+    boot_printk("[vfs-test] Verifying dcache hit for /test.txt...\n");
+    fd2 = do_sys_open(&init_files, "/test.txt", O_RDONLY, 0);
+    if (fd2 < 0) {
+        boot_printk("[vfs-test] FAIL: dcache reopen failed\n");
+        return;
+    }
+    do_sys_close(&init_files, fd2);
+    boot_printk("[vfs-test] dcache hit: PASS\n");
+
+    /* --- Test 4: 创建子目录并在其中创建文件 --- */
+    boot_printk("[vfs-test] Creating /subdir/hello.txt...\n");
+    {
+        struct dentry *root_dentry;
+        struct dentry *subdir_dentry;
+        struct qstr subdir_name;
+        struct inode *root_inode;
+        int ret;
+
+        /* 获取根 dentry */
+        root_dentry = path_lookup("/");
+        if (!root_dentry || !root_dentry->d_inode) {
+            boot_printk("[vfs-test] FAIL: root lookup failed\n");
+            return;
+        }
+        root_inode = root_dentry->d_inode;
+
+        /* 创建子目录 dentry */
+        subdir_name.name = "subdir";
+        subdir_name.len = 6;
+        subdir_name.hash = full_name_hash(root_dentry, "subdir", 6);
+
+        subdir_dentry = d_alloc(root_dentry, &subdir_name);
+        if (!subdir_dentry) {
+            boot_printk("[vfs-test] FAIL: d_alloc subdir failed\n");
+            return;
+        }
+
+        /* 调用 mkdir */
+        ret = root_inode->i_op->mkdir(root_inode, subdir_dentry, 0755);
+        if (ret != 0) {
+            boot_printk("[vfs-test] FAIL: mkdir returned error\n");
+            return;
+        }
+
+        /* 在子目录中创建文件 */
+        fd = do_sys_open(&init_files, "/subdir/hello.txt",
+                         O_CREAT | O_WRONLY, 0644);
+        if (fd < 0) {
+            boot_printk("[vfs-test] FAIL: open /subdir/hello.txt error ");
+            boot_printk_hex((unsigned long)fd);
+            boot_printk("\n");
+            return;
+        }
+
+        filp = fget(&init_files, fd);
+        vfs_write(filp, "subdir OK\n", 10);
+        do_sys_close(&init_files, fd);
+
+        /* 读回验证 */
+        fd = do_sys_open(&init_files, "/subdir/hello.txt", O_RDONLY, 0);
+        if (fd < 0) {
+            boot_printk("[vfs-test] FAIL: reopen /subdir/hello.txt error\n");
+            return;
+        }
+
+        filp = fget(&init_files, fd);
+        for (i = 0; i < 32; i++)
+            buf[i] = 0;
+        nread = vfs_read(filp, buf, 16);
+        do_sys_close(&init_files, fd);
+
+        if (nread == 10 && vfs_str_equal(buf, "subdir OK\n", 10)) {
+            boot_printk("[vfs-test] Subdirectory file test: PASS\n");
+        } else {
+            boot_printk("[vfs-test] FAIL: subdir file content mismatch\n");
+            return;
+        }
+    }
+
+    boot_printk("[BOOT] VFS + dentry cache: all tests passed\n");
 }

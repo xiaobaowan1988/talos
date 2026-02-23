@@ -48,10 +48,12 @@ struct dentry_operations;
 #define S_IFMT      0170000     /* 文件类型掩码 */
 #define S_IFREG     0100000     /* 普通文件 */
 #define S_IFDIR     0040000     /* 目录 */
+#define S_IFCHR     0020000     /* 字符设备（Phase 9: whiteout 使用）*/
 #define S_IFLNK     0120000     /* 符号链接 */
 
 #define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)
 #define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)
+#define S_ISCHR(m)  (((m) & S_IFMT) == S_IFCHR)
 #define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
 
 /* 权限位 */
@@ -100,7 +102,7 @@ struct dentry_operations;
  * VFS 对象池大小（静态分配）
  * ============================================================
  */
-#define MAX_SUPERBLOCKS     4
+#define MAX_SUPERBLOCKS     6
 #define MAX_INODES          128
 #define MAX_DENTRIES        256
 #define MAX_FILES           64
@@ -358,6 +360,9 @@ void fput(struct file *filp);
 int alloc_fd(struct files_struct *files);
 void fd_install(struct files_struct *files, int fd, struct file *filp);
 struct file *fget(struct files_struct *files, int fd);
+
+/* --- file.c --- */
+int do_sys_unlink(struct files_struct *files, const char *pathname);
 
 /* --- namei.c --- */
 struct dentry *path_lookup(const char *pathname);

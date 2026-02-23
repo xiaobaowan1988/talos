@@ -368,6 +368,54 @@ int do_sys_close(struct files_struct *files, int fd)
 
 /*
  * ============================================================
+ * do_sys_unlink - 内核级 unlink 实现
+ *
+ * 删除文件。调用父目录 inode 的 unlink 回调。
+ *
+ * @files:    进程的文件描述符表（未使用，保持接口一致性）
+ * @pathname: 文件路径
+ *
+ * 返回 0 成功，负数表示错误。
+ *
+ * 参考：fs/namei.c do_unlinkat()
+ * ============================================================
+ */
+int do_sys_unlink(struct files_struct *files, const char *pathname)
+{
+    struct dentry *dentry;
+    struct inode *dir_inode;
+
+    (void)files;
+
+    /* 查找目标 dentry */
+    dentry = path_lookup(pathname);
+    if (!dentry || !dentry->d_inode)
+        return -(int)ENOENT;
+
+    /* 不能删除目录（需要 rmdir） */
+    if (S_ISDIR(dentry->d_inode->i_mode)) {
+        dput(dentry);
+        return -(int)EISDIR;
+    }
+
+    /* 获取父目录 inode */
+    if (!dentry->d_parent || !dentry->d_parent->d_inode) {
+        dput(dentry);
+        return -(int)ENOENT;
+    }
+    dir_inode = dentry->d_parent->d_inode;
+
+    /* 调用文件系统的 unlink 回调 */
+    if (!dir_inode->i_op || !dir_inode->i_op->unlink) {
+        dput(dentry);
+        return -(int)ENOSYS;
+    }
+
+    return dir_inode->i_op->unlink(dir_inode, dentry);
+}
+
+/*
+ * ============================================================
  * vfs_read - VFS 读操作
  *
  * 从 file 对象读取数据。调用文件系统的 read 回调。

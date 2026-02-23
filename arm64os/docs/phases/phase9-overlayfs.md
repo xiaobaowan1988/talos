@@ -233,59 +233,65 @@ int ovl_iterate(struct file *file, struct dir_context *ctx) {
 ```
 容器启动流程（结合 Phase 8 + Phase 9）：
 
-1. 解压容器镜像 → squashfs（只读压缩层）
-   mksquashfs /image_layer /image.sqsh -comp zstd
+1. Phase 8 已构建 squashfs 只读镜像并挂载到 /sq
+   squashfs 包含 hello.txt 和 readme.txt
 
-2. 挂载 squashfs 作为 lower 层
-   mount -t squashfs /image.sqsh /lower -o ro
+2. 在根文件系统（ramfs）上创建 upper 和 work 目录
+   mkdir /upper /work
+   （注：ramfs 支持 mkdir 和文件创建，适合作为 upper 层）
 
-3. 准备 upper（XFS）和 work 目录
-   mkdir -p /upper /work
-
-4. 挂载 overlayfs
+3. 挂载 overlayfs
    mount -t overlay overlay \
-       -o lowerdir=/lower,upperdir=/upper,workdir=/work \
+       -o lowerdir=/sq,upperdir=/upper,workdir=/work \
        /merged
 
-5. 容器进程在 /merged 中运行
-   - 读操作：命中 upper（copy-up过的文件）或透传到 lower
+4. 容器进程在 /merged 中运行
+   - 读操作：命中 upper（copy-up 过的文件）或透传到 lower
    - 写操作：自动触发 copy-up，修改写入 upper
-   - 删除操作：在 upper 创建 whiteout
+   - 删除操作：在 upper 创建 whiteout（S_IFCHR 字符设备 0,0）
 
-6. 容器销毁：清空 upper 目录（lower squashfs 不变）
+5. 容器销毁：清空 upper 目录（lower squashfs 不变）
 ```
 
 ## 9.8 验证方法
 
 ```c
-void test_overlayfs(void) {
-    /* 挂载 squashfs 作为 lower */
-    do_mount("/dev/vda", "/lower", "squashfs", MS_RDONLY, NULL);
+void test_phase9(void) {
+    /* Phase 8 已完成：squashfs 挂载在 /sq，XFS 挂载在 /xfs */
 
-    /* 挂载 overlayfs */
-    char opts[] = "lowerdir=/lower,upperdir=/upper,workdir=/work";
-    do_mount("overlay", "/merged", "overlay", 0, opts);
+    /* 1. 在 ramfs 根上创建 upper 和 work 目录 */
+    /* 通过 VFS mkdir 创建 /upper 和 /work */
 
-    /* 读取 lower 层文件（直接读，不触发 copy-up）*/
-    int fd = sys_openat(AT_FDCWD, "/merged/etc/hosts", O_RDONLY, 0);
-    printk("read lower file: OK (fd=%d)\n", fd);
-    sys_close(fd);
+    /* 2. 挂载 overlayfs */
+    do_mount("overlay", "/merged", "overlay", 0,
+             "lowerdir=/sq,upperdir=/upper,workdir=/work");
 
-    /* 写入文件（触发 copy-up）*/
-    fd = sys_openat(AT_FDCWD, "/merged/etc/hosts", O_WRONLY, 0);
-    sys_write(fd, "127.0.0.1 container\n", 20);
-    sys_close(fd);
+    /* 3. 读穿测试：读取 lower 层文件（不触发 copy-up）*/
+    int fd = do_sys_open(&init_files, "/merged/hello.txt", O_RDONLY, 0);
+    /* 读取内容 → "squashfs works!\n"（来自 squashfs 层） */
+    vfs_read(filp, buf, 64);
+    assert(buf == "squashfs works!\n");  /* 16 字节 */
+    do_sys_close(&init_files, fd);
 
-    /* 验证 upper 层有副本 */
-    struct stat st;
-    sys_stat("/upper/etc/hosts", &st);
-    printk("copy-up OK: upper/etc/hosts size=%lld\n", st.st_size);
+    /* 4. copy-up 测试：写入 lower 层文件，触发 copy-up */
+    fd = do_sys_open(&init_files, "/merged/hello.txt", O_WRONLY, 0);
+    /* overlayfs 自动将 hello.txt 从 lower 复制到 upper */
+    vfs_write(filp, "overlayfs!\n", 11);
+    do_sys_close(&init_files, fd);
 
-    /* 删除文件（创建 whiteout）*/
-    sys_unlinkat(AT_FDCWD, "/merged/etc/resolv.conf", 0);
-    /* 验证 whiteout 存在 */
-    sys_lstat("/upper/etc/resolv.conf", &st);
-    printk("whiteout OK: mode=0x%x\n", st.st_mode);
+    /* 5. 验证 copy-up 后读到的是 upper 层的修改版本 */
+    fd = do_sys_open(&init_files, "/merged/hello.txt", O_RDONLY, 0);
+    vfs_read(filp, buf, 64);
+    assert(buf == "overlayfs!\n");  /* 11 字节，来自 upper 层 */
+    do_sys_close(&init_files, fd);
+
+    /* 6. whiteout 测试：删除 lower 层文件 */
+    do_sys_unlink(&init_files, "/merged/readme.txt");
+    /* overlayfs 在 upper 层创建 whiteout（S_IFCHR, dev 0,0）*/
+
+    /* 7. 验证 whiteout 生效：文件不可见 */
+    fd = do_sys_open(&init_files, "/merged/readme.txt", O_RDONLY, 0);
+    assert(fd < 0);  /* ENOENT — 被 whiteout 屏蔽 */
 }
 ```
 

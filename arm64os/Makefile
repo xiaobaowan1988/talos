@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 8 构建系统
+# Phase 9 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2+3+4+5+6+7+8 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3+4+5+6+7+8+9 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -128,6 +128,11 @@ OBJS := \
     fs/xfs/xfs_inode.o \
     fs/xfs/xfs_alloc.o \
     fs/xfs/xfs_dir2.o \
+    fs/overlayfs/super.o \
+    fs/overlayfs/inode.o \
+    fs/overlayfs/dir.o \
+    fs/overlayfs/file.o \
+    fs/overlayfs/copy_up.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -218,6 +223,10 @@ fs/squashfs/%.o: fs/squashfs/%.c
 
 # Phase 8: fs/xfs/ C 文件
 fs/xfs/%.o: fs/xfs/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 9: fs/overlayfs/ C 文件
+fs/overlayfs/%.o: fs/overlayfs/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---- 编译 C 文件 ----
@@ -331,7 +340,7 @@ QEMU_TIMEOUT    ?= 30
 
 .PHONY: test
 test: check-qemu $(TARGET) $(DISK_IMG)
-	@echo "=== Running Phase 8 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@echo "=== Running Phase 9 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) $(QEMU) \
 	    $(QEMU_COMMON) \
 	    -nographic \
@@ -363,6 +372,10 @@ test: check-qemu $(TARGET) $(DISK_IMG)
 	@grep -q "squashfs read: PASS"            /tmp/arm64os_test.log && echo "PASS: squashfs read"                  || echo "FAIL: 'squashfs read: PASS' not found"
 	@grep -q "XFS write+read: PASS"           /tmp/arm64os_test.log && echo "PASS: XFS write+read"                || echo "FAIL: 'XFS write+read: PASS' not found"
 	@grep -q "Phase 8 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 8 complete"               || echo "FAIL: 'Phase 8 complete' not found"
+	@grep -q "read-through: PASS"            /tmp/arm64os_test.log && echo "PASS: overlayfs read-through"          || echo "FAIL: 'read-through: PASS' not found"
+	@grep -q "copy-up write+read: PASS"      /tmp/arm64os_test.log && echo "PASS: overlayfs copy-up"               || echo "FAIL: 'copy-up write+read: PASS' not found"
+	@grep -q "whiteout: PASS"                /tmp/arm64os_test.log && echo "PASS: overlayfs whiteout"              || echo "FAIL: 'whiteout: PASS' not found"
+	@grep -q "Phase 9 complete"              /tmp/arm64os_test.log && echo "PASS: Phase 9 complete"               || echo "FAIL: 'Phase 9 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -405,7 +418,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 8 Build System"
+	@echo "arm64os Phase 9 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

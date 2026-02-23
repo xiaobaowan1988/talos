@@ -52,6 +52,14 @@
  *   - 挂载 squashfs 到 /sq，XFS 到 /xfs
  *   - 读取 squashfs 只读文件，XFS 文件创建/读写验证
  *
+ * Phase 9 新增：
+ *   - ovl_init()：注册 overlay 文件系统
+ *   - 在 ramfs 根上创建 /upper 和 /work 目录
+ *   - 挂载 overlayfs 到 /merged（lower=/sq, upper=/upper, work=/work）
+ *   - 读穿测试（从 lower squashfs 读取）
+ *   - copy-up 测试（写入触发 lower→upper 复制）
+ *   - whiteout 测试（删除 lower 文件，创建屏蔽标记）
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
@@ -133,6 +141,11 @@ void squashfs_mkfs_test(void);
 void xfs_init(void);
 void xfs_mkfs(void);
 static void test_phase8(void);
+
+/* Phase 9：overlayfs（fs/overlayfs/） */
+void ovl_init(void);
+int do_sys_unlink(struct files_struct *files, const char *pathname);
+static void test_phase9(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -291,7 +304,7 @@ void panic_unhandled(void)
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 8: squashfs + XFS\n");
+    boot_printk("[BOOT] Phase 9: overlayfs\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -481,7 +494,25 @@ void start_kernel(void)
 
     boot_printk("[BOOT] Phase 8 complete\n");
 
-    /* Phase 8 终态：调度器运行中，挂死 idle 进程 */
+    /* ---- Phase 9: overlayfs 三层联合挂载 ---- */
+    /*
+     * Phase 9 初始化顺序：
+     *   1. 注册 overlay 文件系统类型
+     *   2. 在 ramfs 根上创建 /upper 和 /work 目录
+     *   3. 挂载 overlayfs 到 /merged（lower=/sq, upper=/upper, work=/work）
+     *   4. 运行验证测试：读穿、copy-up、whiteout
+     */
+    boot_printk("[BOOT] === Phase 9: overlayfs ===\n");
+
+    boot_printk("[BOOT] Registering overlayfs...\n");
+    ovl_init();
+
+    /* 运行 Phase 9 测试 */
+    test_phase9();
+
+    boot_printk("[BOOT] Phase 9 complete\n");
+
+    /* Phase 9 终态：调度器运行中，挂死 idle 进程 */
     while (1)
         __asm__ volatile("wfi");
 }
@@ -971,4 +1002,231 @@ static void test_phase8(void)
     }
 
     boot_printk("[BOOT] Phase 8 filesystem tests: all passed\n");
+}
+
+/*
+ * ============================================================
+ * Phase 9: overlayfs 验证
+ *
+ * 流程：
+ *   1. 在 ramfs 根上创建 /upper 和 /work 目录
+ *   2. 挂载 overlayfs 到 /merged（lower=/sq, upper=/upper, work=/work）
+ *   3. 读穿测试：读 /merged/hello.txt → 来自 lower 层 squashfs
+ *   4. copy-up 测试：写 /merged/hello.txt → 触发 copy-up → 修改后内容来自 upper
+ *   5. whiteout 测试：删除 /merged/readme.txt → 创建 whiteout → 文件不可见
+ *
+ * 参考：Phase 9 设计文档 §9.8
+ * ============================================================
+ */
+static void test_phase9(void)
+{
+    int fd;
+    char buf[64];
+    ssize_t n;
+    struct file *filp;
+    int i;
+
+    boot_printk("[BOOT] === Phase 9: overlayfs test ===\n");
+
+    /* === Step 1: 创建 upper 和 work 目录 === */
+    /*
+     * ramfs（根文件系统）支持 mkdir。
+     * 通过 VFS 接口创建 /upper 和 /work 目录。
+     */
+    boot_printk("[p9-test] Creating /upper and /work dirs...\n");
+    {
+        struct dentry *root_dentry;
+        struct dentry *dir_dentry;
+        struct qstr dir_name;
+        struct inode *root_inode;
+        int ret;
+
+        root_dentry = path_lookup("/");
+        if (!root_dentry || !root_dentry->d_inode) {
+            boot_printk("[p9-test] FAIL: root lookup failed\n");
+            return;
+        }
+        root_inode = root_dentry->d_inode;
+
+        /* 创建 /upper */
+        dir_name.name = "upper";
+        dir_name.len = 5;
+        dir_name.hash = full_name_hash(root_dentry, "upper", 5);
+
+        dir_dentry = d_alloc(root_dentry, &dir_name);
+        if (!dir_dentry) {
+            boot_printk("[p9-test] FAIL: d_alloc /upper\n");
+            return;
+        }
+
+        ret = root_inode->i_op->mkdir(root_inode, dir_dentry, 0755);
+        if (ret != 0) {
+            boot_printk("[p9-test] FAIL: mkdir /upper\n");
+            return;
+        }
+
+        /* 创建 /work */
+        dir_name.name = "work";
+        dir_name.len = 4;
+        dir_name.hash = full_name_hash(root_dentry, "work", 4);
+
+        dir_dentry = d_alloc(root_dentry, &dir_name);
+        if (!dir_dentry) {
+            boot_printk("[p9-test] FAIL: d_alloc /work\n");
+            return;
+        }
+
+        ret = root_inode->i_op->mkdir(root_inode, dir_dentry, 0755);
+        if (ret != 0) {
+            boot_printk("[p9-test] FAIL: mkdir /work\n");
+            return;
+        }
+    }
+    boot_printk("[p9-test] /upper and /work created\n");
+
+    /* === Step 2: 挂载 overlayfs === */
+    boot_printk("[p9-test] Mounting overlayfs on /merged...\n");
+    if (do_mount("overlay", "/merged", "overlay", 0,
+                  "lowerdir=/sq,upperdir=/upper,workdir=/work") != 0) {
+        boot_printk("[p9-test] FAIL: mount overlayfs\n");
+        return;
+    }
+
+    /* === Step 3: 读穿测试 === */
+    /*
+     * 读取 /merged/hello.txt — 文件只存在于 lower 层（squashfs）。
+     * overlayfs 应透传到 squashfs 读取。
+     * 预期内容："squashfs works!\n"（16 字节）
+     */
+    boot_printk("[p9-test] Read-through: /merged/hello.txt...\n");
+    fd = do_sys_open(&init_files, "/merged/hello.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        boot_printk("[p9-test] FAIL: open /merged/hello.txt, err=");
+        boot_printk_hex((unsigned long)fd);
+        boot_printk("\n");
+        return;
+    }
+
+    filp = fget(&init_files, fd);
+    if (!filp) {
+        boot_printk("[p9-test] FAIL: fget returned NULL\n");
+        return;
+    }
+
+    for (i = 0; i < 64; i++)
+        buf[i] = 0;
+
+    n = vfs_read(filp, buf, 64);
+    do_sys_close(&init_files, fd);
+
+    boot_printk("[p9-test] read-through: ");
+    boot_printk_hex((unsigned long)n);
+    boot_printk(" bytes\n");
+
+    if (n == 16 && vfs_str_equal(buf, "squashfs works!\n", 16)) {
+        boot_printk("[p9-test] read-through: PASS\n");
+    } else {
+        boot_printk("[p9-test] FAIL: read-through content mismatch\n");
+        buf[32] = '\0';
+        boot_printk("[p9-test] got: ");
+        boot_printk(buf);
+        boot_printk("\n");
+        return;
+    }
+
+    /* === Step 4: copy-up + write 测试 === */
+    /*
+     * 写入 /merged/hello.txt：
+     *   - 文件在 lower 层（只读）
+     *   - overlayfs 先执行 copy-up（复制到 upper 层）
+     *   - 然后在 upper 层执行写入
+     *   - 写入后文件大小变为新内容长度
+     */
+    boot_printk("[p9-test] Copy-up + write: /merged/hello.txt...\n");
+    fd = do_sys_open(&init_files, "/merged/hello.txt", O_WRONLY, 0);
+    if (fd < 0) {
+        boot_printk("[p9-test] FAIL: open for write, err=");
+        boot_printk_hex((unsigned long)fd);
+        boot_printk("\n");
+        return;
+    }
+
+    filp = fget(&init_files, fd);
+    n = vfs_write(filp, "overlayfs!\n", 11);
+    do_sys_close(&init_files, fd);
+
+    if (n != 11) {
+        boot_printk("[p9-test] FAIL: write returned ");
+        boot_printk_hex((unsigned long)n);
+        boot_printk("\n");
+        return;
+    }
+
+    /* 验证 copy-up 后读取到修改后的内容 */
+    fd = do_sys_open(&init_files, "/merged/hello.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        boot_printk("[p9-test] FAIL: reopen after write\n");
+        return;
+    }
+
+    filp = fget(&init_files, fd);
+    for (i = 0; i < 64; i++)
+        buf[i] = 0;
+    n = vfs_read(filp, buf, 64);
+    do_sys_close(&init_files, fd);
+
+    if (n == 11 && vfs_str_equal(buf, "overlayfs!\n", 11)) {
+        boot_printk("[p9-test] copy-up write+read: PASS\n");
+    } else {
+        boot_printk("[p9-test] FAIL: copy-up content mismatch (read ");
+        boot_printk_hex((unsigned long)n);
+        boot_printk(" bytes)\n");
+        buf[32] = '\0';
+        boot_printk("[p9-test] got: ");
+        boot_printk(buf);
+        boot_printk("\n");
+        return;
+    }
+
+    /* === Step 5: whiteout 测试 === */
+    /*
+     * 删除 /merged/readme.txt：
+     *   - 文件只在 lower 层（squashfs，只读）
+     *   - overlayfs 无法修改 lower，在 upper 层创建 whiteout
+     *   - whiteout 是 S_IFCHR 类型的特殊文件
+     *   - 之后 lookup 遇到 whiteout 认为文件不存在
+     */
+    boot_printk("[p9-test] Whiteout: unlinking /merged/readme.txt...\n");
+
+    /* 先验证文件存在 */
+    fd = do_sys_open(&init_files, "/merged/readme.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        boot_printk("[p9-test] FAIL: readme.txt not accessible before unlink\n");
+        return;
+    }
+    do_sys_close(&init_files, fd);
+
+    /* 执行 unlink（创建 whiteout） */
+    {
+        int ret = do_sys_unlink(&init_files, "/merged/readme.txt");
+        if (ret != 0) {
+            boot_printk("[p9-test] FAIL: unlink returned ");
+            boot_printk_hex((unsigned long)ret);
+            boot_printk("\n");
+            return;
+        }
+    }
+
+    /* 验证文件不再可见 */
+    fd = do_sys_open(&init_files, "/merged/readme.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        /* 预期失败（ENOENT）— whiteout 生效 */
+        boot_printk("[p9-test] whiteout: PASS (readme.txt hidden)\n");
+    } else {
+        boot_printk("[p9-test] FAIL: readme.txt still visible after whiteout\n");
+        do_sys_close(&init_files, fd);
+        return;
+    }
+
+    boot_printk("[BOOT] Phase 9 overlayfs tests: all passed\n");
 }

@@ -13,6 +13,10 @@
  *   - struct cfs_rq：CFS 运行队列
  *   - struct rq：每 CPU 运行队列
  *   - struct cpu_context：上下文切换寄存器保存区
+ *
+ * Phase 5 新增：
+ *   - struct mm_struct：简化版内存描述符（用户页表）
+ *   - task_struct.mm 字段：指向进程的用户地址空间
  */
 
 #ifndef __LINUX_SCHED_H
@@ -95,6 +99,20 @@ struct cpu_context {
 
 /*
  * ============================================================
+ * mm_struct - 进程内存描述符（简化版）
+ *
+ * Phase 5：每个用户进程拥有独立的 TTBR0 页表。
+ * 内核线程的 mm 为 NULL。
+ *
+ * 参考：include/linux/mm_types.h struct mm_struct
+ * ============================================================
+ */
+struct mm_struct {
+    unsigned long   pgd;            /* TTBR0 页表基址（物理地址）*/
+};
+
+/*
+ * ============================================================
  * sched_entity - CFS 调度实体
  *
  * 每个进程包含一个 sched_entity，记录该进程在 CFS 中的调度状态。
@@ -117,9 +135,11 @@ struct sched_entity {
  * task_struct - 进程控制块
  *
  * Phase 4 简化版：
- *   - 所有进程为内核线程（无 mm_struct）
  *   - 静态分配（最多 MAX_TASKS 个）
  *   - 无信号、无文件描述符等
+ *
+ * Phase 5 新增：
+ *   - mm：内存描述符（NULL = 内核线程，非NULL = 用户进程）
  *
  * 参考：include/linux/sched.h struct task_struct
  * ============================================================
@@ -131,6 +151,7 @@ struct task_struct {
     int                 pid;                /* 进程 ID */
     int                 prio;               /* 优先级 = nice + 20 (0-39) */
     char                comm[16];           /* 进程名 */
+    struct mm_struct   *mm;                 /* 内存描述符（Phase 5）*/
     struct sched_entity se;                 /* CFS 调度实体 */
     struct cpu_context  thread;             /* 上下文切换保存区 */
 };
@@ -141,13 +162,14 @@ struct task_struct {
  * 供 process.S 中 cpu_switch_to 使用。
  * 必须与 struct task_struct 的实际布局匹配。
  *
- * 计算方式：
+ * 计算方式（Phase 5 更新）：
  *   state:    8 bytes (long)
  *   flags:    8 bytes (unsigned long)
  *   stack:    8 bytes (pointer)
  *   pid:      4 bytes (int)
  *   prio:     4 bytes (int)
  *   comm:    16 bytes (char[16])
+ *   mm:       8 bytes (pointer)       ← Phase 5 新增
  *   se:       sched_entity size
  *     load_weight: 8 bytes
  *     rb_node: 24 bytes (3 × unsigned long)
@@ -157,9 +179,17 @@ struct task_struct {
  *     sum_exec_runtime: 8 bytes
  *   se total = 8 + 24 + 8 + 8 + 8 + 8 = 64 bytes
  *
- *   offset = 8 + 8 + 8 + 4 + 4 + 16 + 64 = 112
+ *   offset = 8 + 8 + 8 + 4 + 4 + 16 + 8 + 64 = 120
  */
-#define THREAD_CPU_CONTEXT  112
+#define THREAD_CPU_CONTEXT  120
+
+/*
+ * TASK_MM_OFFSET - task_struct 中 mm 字段的偏移量
+ *
+ * 供 process.S 中 context_switch 切换 TTBR0 使用。
+ *   offset = 8 + 8 + 8 + 4 + 4 + 16 = 48
+ */
+#define TASK_MM_OFFSET      48
 
 /*
  * ============================================================

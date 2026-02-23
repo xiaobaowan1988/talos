@@ -81,13 +81,30 @@ struct task_struct *get_current(void)
  * 调用 cpu_switch_to() 汇编，保存 prev 的 callee-saved 寄存器，
  * 恢复 next 的寄存器，然后跳转到 next 的恢复点。
  *
- * Phase 4 所有进程为内核线程，不切换页表。
+ * Phase 4 内核线程不切换页表。
+ * Phase 5 新增：用户进程切换 TTBR0。
  *
  * 参考：kernel/sched/core.c context_switch()
  * ============================================================
  */
+
+/* Phase 5：TTBR0 切换（mmu.c）*/
+extern void switch_ttbr0(unsigned long pgd_phys);
+extern unsigned long get_kernel_pgd(void);
+
 static void context_switch(struct task_struct *prev, struct task_struct *next)
 {
+    /*
+     * Phase 5：切换 TTBR0（用户地址空间页表）
+     *
+     * - 如果 next 是用户进程（mm != NULL），切换到它的 pgd
+     * - 如果 next 是内核线程（mm == NULL），切换回内核初始 pgd
+     */
+    if (next->mm)
+        switch_ttbr0(next->mm->pgd);
+    else if (prev && prev->mm)
+        switch_ttbr0(get_kernel_pgd());
+
     cpu_switch_to(prev, next);
 }
 
@@ -286,6 +303,7 @@ struct task_struct *kernel_thread_create(void (*fn)(void), const char *name,
     tsk->stack = page_address(stack_page);
     tsk->pid = next_pid++;
     tsk->prio = nice + 20; /* nice → prio：nice=-20→prio=0, nice=0→prio=20 */
+    tsk->mm = NULL;         /* 内核线程无用户地址空间 */
 
     /* 设置进程名 */
     for (i = 0; i < 15 && name[i]; i++)
@@ -379,6 +397,7 @@ void sched_init(void)
     idle_task.stack = NULL;  /* idle 使用 head.S 的 init_stack */
     idle_task.pid = -1;      /* 特殊 PID：不计入 task_pool */
     idle_task.prio = 39;     /* 最低优先级 */
+    idle_task.mm = NULL;     /* 内核线程无用户地址空间 */
     idle_task.comm[0] = 'i'; idle_task.comm[1] = 'd';
     idle_task.comm[2] = 'l'; idle_task.comm[3] = 'e';
     idle_task.comm[4] = '\0';

@@ -26,10 +26,16 @@
  *   - sched_init()：初始化 CFS 调度器（idle 进程、运行队列）
  *   - test_scheduler()：创建 3 个不同优先级内核线程，验证 CFS 按权重分配
  *
+ * Phase 5 新增：
+ *   - 创建用户进程页表，加载嵌入的 init ELF 映像
+ *   - 创建用户 init 进程，调度运行
+ *   - 用户程序通过 SVC #0 调用 write() 和 exit()
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
 #include <linux/types.h>
+#include <linux/sched.h>
 #include <asm/memory.h>
 
 /* 由 printk.c 提供 */
@@ -53,9 +59,32 @@ void gicv3_init(void);
 void arch_timer_init(void);
 extern volatile int arch_timer_tick_count;
 
-/* Phase 4：CFS 调度器（kernel/sched/core.c） */
-void sched_init(void);
-void test_scheduler(void);
+/* Phase 5：用户页表（arch/arm64/mm/mmu.c） */
+unsigned long create_user_pgd(void);
+int map_user_page(unsigned long pgd_phys, unsigned long va,
+                  unsigned long pa, unsigned long attrs);
+
+/* Phase 5：ELF 加载器（fs/binfmt_elf.c） */
+int load_elf_binary(const void *elf_data, size_t elf_size,
+                    unsigned long pgd_phys, unsigned long *entry_out);
+
+/* Phase 5：用户进程创建（kernel/fork.c） */
+struct task_struct *create_user_task(unsigned long pgd_phys,
+                                     unsigned long entry_pc,
+                                     unsigned long user_sp,
+                                     const char *name);
+
+/* Phase 5：嵌入的 init ELF 二进制（userspace/init_blob.S） */
+extern unsigned char _user_init_start[];
+extern unsigned long _user_init_size;
+
+/* Phase 5：用户栈页分配 */
+struct page;
+struct page *alloc_pages(unsigned int order);
+void *page_address(struct page *page);
+
+/* Phase 5：前向声明 */
+static void test_user_process(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -214,7 +243,7 @@ void panic_unhandled(void)
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 4: CFS scheduler\n");
+    boot_printk("[BOOT] Phase 5: syscall + ELF loader\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -323,9 +352,139 @@ void start_kernel(void)
     test_scheduler();
 
     boot_printk("[BOOT] Phase 4 complete\n");
-    boot_printk("[BOOT] Phase 5 will add system calls + ELF loading\n");
 
-    /* Phase 4 终态：调度器运行中，挂死 idle 进程 */
+    /* ---- Phase 5: 系统调用 + ELF 加载 ---- */
+    test_user_process();
+
+    boot_printk("[BOOT] Phase 5 complete\n");
+
+    /* Phase 5 终态：调度器运行中，挂死 idle 进程 */
     while (1)
         __asm__ volatile("wfi");
+}
+
+/*
+ * ============================================================
+ * Phase 5: 用户进程验证
+ *
+ * 流程：
+ *   1. 创建用户进程页表（create_user_pgd）
+ *   2. 加载嵌入的 init ELF 映像（load_elf_binary）
+ *   3. 分配用户栈页并映射
+ *   4. 创建用户 init 进程（create_user_task）
+ *   5. 调度运行：idle → init → write("Hello from user space!\n") → exit(0)
+ * ============================================================
+ */
+
+/* 用户栈顶地址 */
+#define USER_STACK_TOP      0x00800000UL
+#define USER_STACK_PAGES    4           /* 16KB 用户栈 */
+
+static void test_user_process(void)
+{
+    unsigned long pgd_phys;
+    unsigned long entry_pc;
+    unsigned long stack_pa;
+    struct page *stack_page;
+    struct task_struct *init_task;
+    int ret, i;
+
+    boot_printk("[BOOT] === Phase 5: user process test ===\n");
+
+    /* Step 1: 创建用户页表 */
+    boot_printk("[BOOT] Creating user page table...\n");
+    pgd_phys = create_user_pgd();
+    if (!pgd_phys) {
+        boot_printk("[BOOT] FAIL: create_user_pgd failed\n");
+        return;
+    }
+    boot_printk("[BOOT] User PGD: ");
+    boot_printk_hex(pgd_phys);
+    boot_printk("\n");
+
+    /* Step 2: 加载 ELF 映像 */
+    boot_printk("[BOOT] Loading init ELF (size=");
+    boot_printk_hex(_user_init_size);
+    boot_printk(")...\n");
+
+    ret = load_elf_binary(_user_init_start, (size_t)_user_init_size,
+                          pgd_phys, &entry_pc);
+    if (ret != 0) {
+        boot_printk("[BOOT] FAIL: load_elf_binary returned ");
+        boot_printk_hex((unsigned long)ret);
+        boot_printk("\n");
+        return;
+    }
+    boot_printk("[BOOT] ELF loaded, entry=");
+    boot_printk_hex(entry_pc);
+    boot_printk("\n");
+
+    /* Step 3: 分配并映射用户栈 */
+    boot_printk("[BOOT] Setting up user stack...\n");
+    for (i = 0; i < USER_STACK_PAGES; i++) {
+        unsigned long stack_va = USER_STACK_TOP - (unsigned long)(USER_STACK_PAGES - i) * PAGE_SIZE;
+
+        stack_page = alloc_pages(0);
+        if (!stack_page) {
+            boot_printk("[BOOT] FAIL: cannot allocate user stack page\n");
+            return;
+        }
+        stack_pa = (unsigned long)page_address(stack_page);
+
+        /* PD_USER_DATA 定义在 pgtable.h：用户可读写，不可执行 */
+        ret = map_user_page(pgd_phys, stack_va, stack_pa,
+                            (1UL << 10) |   /* AF */
+                            (3UL << 8)  |   /* Inner Shareable */
+                            (1UL << 6)  |   /* AP=01: RW user */
+                            (1UL << 53) |   /* PXN */
+                            (1UL << 54) |   /* UXN */
+                            (1UL << 11) |   /* nG */
+                            (3UL << 2));    /* AttrIdx=3 MT_NORMAL */
+        if (ret != 0) {
+            boot_printk("[BOOT] FAIL: map user stack page\n");
+            return;
+        }
+    }
+    boot_printk("[BOOT] User stack mapped at ");
+    boot_printk_hex(USER_STACK_TOP - (unsigned long)USER_STACK_PAGES * PAGE_SIZE);
+    boot_printk(" - ");
+    boot_printk_hex(USER_STACK_TOP);
+    boot_printk("\n");
+
+    /* Step 4: 创建用户 init 进程 */
+    init_task = create_user_task(pgd_phys, entry_pc, USER_STACK_TOP, "init");
+    if (!init_task) {
+        boot_printk("[BOOT] FAIL: create_user_task failed\n");
+        return;
+    }
+
+    /* Step 5: 让出 CPU，让 init 进程运行 */
+    boot_printk("[BOOT] Scheduling user init process...\n");
+
+    /*
+     * idle 让出 CPU → CFS 选择 init → cpu_switch_to → ret_to_user
+     * → kernel_exit 0 → eret 到 EL0 → init 的 _start
+     * → SVC write → SVC exit → 回到这里
+     */
+    {
+        int timeout = 0;
+        int start_tick = arch_timer_tick_count;
+
+        while (timeout < 200) {
+            schedule();
+            if (init_task->state == TASK_DEAD) {
+                boot_printk("[BOOT] User init process exited successfully\n");
+                boot_printk("[BOOT] syscall + ELF + user process: PASS\n");
+                return;
+            }
+            /* 简单超时检测 */
+            if (arch_timer_tick_count - start_tick > 100) {
+                timeout = 200;
+                break;
+            }
+            __asm__ volatile("wfi");
+        }
+    }
+
+    boot_printk("[BOOT] WARNING: user init did not exit in time\n");
 }

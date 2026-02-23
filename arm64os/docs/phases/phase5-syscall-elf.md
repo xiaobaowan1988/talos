@@ -266,13 +266,49 @@ void _start(void) {
 ```
 arm64os/
 ├── arch/arm64/kernel/
-│   ├── entry.S        ← 更新：添加 el0_svc 处理路径
-│   └── syscall.S      ← 系统调用分发入口
-├── kernel/syscall/
-│   ├── sys_table.c    ← 系统调用表
-│   └── exec.c         ← execve / do_execve
-├── kernel/fork.c      ← do_fork、copy_process
-├── fs/binfmt_elf.c    ← ELF加载器（核心）
-└── userspace/
-    └── init/          ← 最小 init 进程（测试用）
+│   ├── entry.S            ← 更新：el0_sync 区分 SVC 与其他异常
+│   │                         添加 kernel_entry_from_el0 / kernel_exit_to_el0
+│   │                         宏（保存/恢复 SP_EL0 用户栈指针）
+│   └── process.S          ← 更新：context_switch 中切换 TTBR0（用户页表）
+├── arch/arm64/mm/
+│   └── mmu.c              ← 更新：添加用户页表创建/映射接口
+│                              create_user_pgd()、map_user_page()
+├── arch/arm64/include/asm/
+│   └── pgtable.h          ← 更新：添加 2MB Block / 4KB Page 描述符构建宏
+├── include/linux/
+│   ├── sched.h            ← 更新：添加 mm_struct、task_struct.mm 字段
+│   └── elf.h              ← 新增：ELF64 文件格式结构体定义
+├── kernel/
+│   ├── syscall/
+│   │   └── syscall.c      ← 新增：sys_call_table + do_el0_svc 分发
+│   │                         实现 sys_write（UART）、sys_exit
+│   └── fork.c             ← 新增：do_fork、copy_process（简化版）
+├── fs/
+│   └── binfmt_elf.c       ← 新增：ELF 加载器（从内存解析 ELF 映像）
+│                              load_elf_binary()：解析段、映射用户页
+├── userspace/
+│   ├── init.S             ← 新增：最小 init 进程汇编源码
+│   ├── user.ld            ← 新增：用户程序链接脚本（基址 0x00400000）
+│   └── init_blob.S        ← 新增：.incbin 嵌入 init.bin 到内核 .rodata
+└── kernel/main.c          ← 更新：Phase 5 初始化 + 验证流程
 ```
+
+### 设计说明（与原始草案的差异）
+
+1. **不使用单独的 `syscall.S`**：SVC 入口路径直接在 `entry.S` 的
+   `el0_sync` 中通过 ESR_EL1.EC 判断实现（与 Linux 主线一致）。
+   C 层分发在 `kernel/syscall/syscall.c` 中的 `do_el0_svc()` 完成。
+
+2. **用户页表基础设施**：Phase 5 需要 EL0 运行的进程拥有独立的
+   TTBR0 页表。`mmu.c` 新增 `create_user_pgd()` 创建包含内核恒等映射
+   + 用户代码/栈映射的 L0-L3 页表；`process.S` 在上下文切换时更新 TTBR0。
+
+3. **用户程序嵌入方式**：Phase 5 尚无文件系统，init 进程以二进制
+   形式嵌入内核 `.rodata` 段。构建流程：
+   `init.S → init.elf → init.bin → .incbin → 内核链接`。
+   ELF 加载器从内存中解析该映像。
+
+4. **用户虚拟地址布局**：
+   - 代码段：`0x00400000`（标准用户文本段起始地址）
+   - 用户栈顶：`0x00800000`
+   - 内核恒等映射 `[0x40000000, 0x80000000)` 以 AP=00（仅内核可访问）保留

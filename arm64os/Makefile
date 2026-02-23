@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 4 构建系统
+# Phase 5 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2+3+4 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3+4+5 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -103,6 +103,10 @@ OBJS := \
     kernel/sched/core.o \
     drivers/irqchip/gic-v3.o \
     drivers/timer/arm_arch_timer.o \
+    kernel/syscall/syscall.o \
+    kernel/fork.o \
+    fs/binfmt_elf.o \
+    userspace/init_blob.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -159,9 +163,38 @@ drivers/irqchip/%.o: drivers/irqchip/%.c
 drivers/timer/%.o: drivers/timer/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Phase 5: kernel/syscall/ C 文件
+kernel/syscall/%.o: kernel/syscall/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 5: fs/ C 文件
+fs/%.o: fs/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # ---- 编译 C 文件 ----
 kernel/%.o: kernel/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# ---- Phase 5: 用户态 init 程序构建 ----
+#
+# 构建流程：
+#   1. userspace/init.S → userspace/init.o（交叉编译器汇编）
+#   2. userspace/init.o → userspace/init.elf（链接，基址 0x00400000）
+#   3. userspace/init_blob.S（.incbin init.elf）→ userspace/init_blob.o
+#      init_blob.o 链入内核 .rodata 段
+#
+
+# 汇编用户程序（不需要内核头文件）
+userspace/init.o: userspace/init.S
+	$(CC) $(ASFLAGS) -x assembler-with-cpp -c -o $@ $<
+
+# 链接用户程序 ELF（使用用户链接脚本，基址 0x00400000）
+userspace/init.elf: userspace/init.o userspace/user.ld
+	$(LD) -nostdlib -T userspace/user.ld -o $@ userspace/init.o
+
+# 嵌入用户 ELF blob 到内核（init_blob.S 通过 .incbin 引用 init.elf）
+userspace/init_blob.o: userspace/init_blob.S userspace/init.elf
+	$(CC) $(ASFLAGS) -x assembler-with-cpp -c -o $@ $<
 
 # ---- 可选：生成纯二进制（用于 -kernel 加载时若需要 Image 格式）----
 $(BINARY): $(TARGET)
@@ -218,7 +251,7 @@ QEMU_TIMEOUT    ?= 30
 
 .PHONY: test
 test: check-qemu $(TARGET)
-	@echo "=== Running Phase 4 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@echo "=== Running Phase 5 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) $(QEMU) \
 	    -M virt,gic-version=3 \
 	    -cpu cortex-a72 \
@@ -238,6 +271,9 @@ test: check-qemu $(TARGET)
 	@grep -q "test_scheduler start"           /tmp/arm64os_test.log && echo "PASS: Scheduler test started"          || echo "FAIL: 'test_scheduler start' not found"
 	@grep -q "proportional scheduling: PASS"  /tmp/arm64os_test.log && echo "PASS: CFS proportional scheduling"    || echo "FAIL: 'proportional scheduling: PASS' not found"
 	@grep -q "Phase 4 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 4 complete"               || echo "FAIL: 'Phase 4 complete' not found"
+	@grep -q "Hello from user space"          /tmp/arm64os_test.log && echo "PASS: User space output"              || echo "FAIL: 'Hello from user space' not found"
+	@grep -q "syscall + ELF + user process: PASS" /tmp/arm64os_test.log && echo "PASS: Syscall + ELF test"         || echo "FAIL: 'syscall + ELF + user process: PASS' not found"
+	@grep -q "Phase 5 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 5 complete"               || echo "FAIL: 'Phase 5 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -277,13 +313,14 @@ syms: $(TARGET)
 .PHONY: clean
 clean:
 	rm -f $(OBJS) $(TARGET) $(BINARY)
+	rm -f userspace/init.o userspace/init.elf
 	find . -name '*.o' -delete 2>/dev/null || true
 	@echo "Clean done."
 
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 4 Build System"
+	@echo "arm64os Phase 5 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

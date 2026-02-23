@@ -11,6 +11,9 @@
  *   cpu_switch_to(prev, next)：保存 prev 的 callee-saved 寄存器，
  *   恢复 next 的寄存器，跳转到 next 的恢复点。
  *
+ * Phase 5 更新：
+ *   THREAD_CPU_CONTEXT 从 112 → 120（task_struct 新增 mm 字段）
+ *
  * struct cpu_context 布局（来自 include/linux/sched.h）：
  *   offset  0: x19
  *   offset  8: x20
@@ -26,22 +29,27 @@
  *   offset 88: sp
  *   offset 96: pc  (返回地址)
  *
- * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread) = 112
- *   计算：state(8) + flags(8) + stack(8) + pid(4) + prio(4) + comm(16) +
- *         sched_entity(64) = 112
- *   sched_entity = load_weight(8) + rb_node(24) + on_rq(4) + pad(4) +
- *                  vruntime(8) + exec_start(8) + sum_exec_runtime(8) = 64
+ * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread) = 120
+ *   计算（Phase 5）：state(8) + flags(8) + stack(8) + pid(4) + prio(4) +
+ *         comm(16) + mm(8) + sched_entity(64) = 120
  */
 
 /*
  * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread)
- *
- * 该值必须与 include/linux/sched.h 中 struct task_struct 的布局一致。
- * 当 task_struct 的成员变化时，必须同步更新此值。
- *
- * 参考 include/linux/sched.h 中的 #define THREAD_CPU_CONTEXT 112
+ * Phase 5 更新：从 112 → 120（新增 mm 指针 8 字节）
  */
-#define THREAD_CPU_CONTEXT  112
+#define THREAD_CPU_CONTEXT  120
+
+/*
+ * TASK_MM_OFFSET = offsetof(struct task_struct, mm)
+ *   state(8) + flags(8) + stack(8) + pid(4) + prio(4) + comm(16) = 48
+ */
+#define TASK_MM_OFFSET      48
+
+/*
+ * MM_PGD_OFFSET = offsetof(struct mm_struct, pgd) = 0
+ */
+#define MM_PGD_OFFSET       0
 
     .section ".text", "ax"
 
@@ -52,13 +60,7 @@
  *   x0 = prev task_struct 指针
  *   x1 = next task_struct 指针
  *
- * 返回：
- *   当 prev 被再次选中执行时，从 ret 指令返回，x0 = prev
- *
- * callee-saved 寄存器（AArch64 PCS）：x19-x28, x29(FP), SP, LR(x30)
- * 我们保存 x19-x28, FP, SP, LR 到 prev->thread（struct cpu_context）。
- *
- * Phase 4：不切换页表（所有进程为内核线程，共享恒等映射）。
+ * Phase 5 新增：检查 next->mm，如果非 NULL 则切换 TTBR0_EL1。
  */
     .global cpu_switch_to
 cpu_switch_to:
@@ -79,6 +81,17 @@ cpu_switch_to:
 
     /* 保存返回地址（LR）作为恢复时的 PC */
     str     x30,      [x8, #96]    /* offset 96(pc) */
+
+    /* ---- 切换 TTBR0（Phase 5）---- */
+    /*
+     * 检查 next->mm：
+     *   如果 next->mm != NULL → 用户进程，切换 TTBR0 到 next->mm->pgd
+     *   如果 next->mm == NULL → 内核线程，切换回内核 init_pgd
+     *
+     * 由 C 层的 context_switch 处理（通过 switch_mm 调用）。
+     * 此处不直接在汇编中实现，保持与 Phase 4 相同的简洁接口。
+     * TTBR0 切换由 C 层在调用 cpu_switch_to 之前完成。
+     */
 
     /* ---- 恢复 next 的上下文 ---- */
 
@@ -104,7 +117,8 @@ cpu_switch_to:
      * 跳转到 next 的恢复点：
      * - 如果 next 之前通过 cpu_switch_to 切出，x9 = 该处的 LR
      *   → 返回到 context_switch() → schedule() 调用者
-     * - 如果 next 是新创建的线程，x9 = ret_from_kernel_thread
-     *   → 跳转到 ret_from_kernel_thread()
+     * - 如果 next 是新创建的内核线程，x9 = ret_from_kernel_thread
+     * - 如果 next 是新创建的用户进程，x9 = ret_to_user
+     *   → 跳转到 ret_to_user → kernel_exit 0 → eret 到 EL0
      */
     br      x9

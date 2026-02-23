@@ -91,6 +91,19 @@ void boot_printk(const char *s)
 }
 
 /*
+ * boot_printk_char - 输出单个字符到 UART
+ *
+ * Phase 5 新增：供 sys_write 逐字符输出用户缓冲区。
+ * '\n' 前自动补发 '\r' 以兼容串口终端。
+ */
+void boot_printk_char(char c)
+{
+    if (c == '\n')
+        uart_putchar('\r');
+    uart_putchar(c);
+}
+
+/*
  * boot_printk_hex - 输出 64-bit 十六进制值（调试用）
  *
  * 格式：0xXXXXXXXXXXXXXXXX

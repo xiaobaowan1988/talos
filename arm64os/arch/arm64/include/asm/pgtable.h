@@ -116,14 +116,38 @@
 
 /*
  * ============================================================
- * 1GB Block descriptor 构建宏
- *
- * 用于 L1 （PUD级别）的1GB大页映射，是 Phase 2 最简单的映射方式。
- * 物理地址必须1GB对齐（bits[29:0] = 0）。
+ * 用户态属性组合（Phase 5 新增）
  * ============================================================
  */
+
+/* 用户代码页（.text）：用户可执行+可读，内核不可执行 */
+#define PD_USER_EXEC        (PD_AF | PD_SH_INNER | PD_AP_RO_ALL | \
+                             PD_PXN | PD_NG | PD_ATTRINDX(3))  /* MT_NORMAL */
+
+/* 用户数据页（.data/.bss/stack）：用户可读写，不可执行 */
+#define PD_USER_DATA        (PD_AF | PD_SH_INNER | PD_AP_RW_ALL | \
+                             PD_PXN | PD_UXN | PD_NG | PD_ATTRINDX(3))
+
+/*
+ * ============================================================
+ * Block / Page descriptor 构建宏
+ * ============================================================
+ */
+
+/* 1GB Block descriptor（L1/PUD 级别）
+ * 物理地址必须 1GB 对齐（bits[29:0] = 0）*/
 #define mk_block_desc(phys, attrs)  \
     (((unsigned long)(phys) & ~((1UL << PUD_SHIFT) - 1)) | (attrs) | PD_BLOCK)
+
+/* 2MB Block descriptor（L2/PMD 级别）
+ * 物理地址必须 2MB 对齐（bits[20:0] = 0）*/
+#define mk_block_desc_2m(phys, attrs)  \
+    (((unsigned long)(phys) & ~((1UL << PMD_SHIFT) - 1)) | (attrs) | PD_BLOCK)
+
+/* 4KB Page descriptor（L3/PTE 级别）
+ * 物理地址必须 4KB 对齐（bits[11:0] = 0）*/
+#define mk_page_desc(phys, attrs)  \
+    (((unsigned long)(phys) & PAGE_MASK) | (attrs) | PD_PAGE)
 
 /*
  * ============================================================

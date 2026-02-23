@@ -22,6 +22,10 @@
  *   - arch_timer_init()：初始化 ARM Virtual Timer，注册 PPI #27
  *   - 使能 IRQ（daifclr #2），等待 10 个 tick 验证中断正常工作
  *
+ * Phase 4 新增：
+ *   - sched_init()：初始化 CFS 调度器（idle 进程、运行队列）
+ *   - test_scheduler()：创建 3 个不同优先级内核线程，验证 CFS 按权重分配
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
@@ -48,6 +52,10 @@ void gicv3_init(void);
 /* Phase 3：ARM arch timer（drivers/timer/arm_arch_timer.c） */
 void arch_timer_init(void);
 extern volatile int arch_timer_tick_count;
+
+/* Phase 4：CFS 调度器（kernel/sched/core.c） */
+void sched_init(void);
+void test_scheduler(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -197,12 +205,16 @@ void panic_unhandled(void)
  *   9. daifclr #2       — 开放 IRQ（清除 DAIF I 位）
  *  10. 轮询 tick_count  — 等待 10 个 timer tick 验证中断链路
  *
+ * Phase 4 新增：
+ *  11. sched_init()     — 初始化 CFS 调度器
+ *  12. test_scheduler() — 创建线程并验证 CFS 按权重分配
+ *
  * 参考：init/main.c: asmlinkage __visible void __init start_kernel(void)
  */
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 3: GIC v3 + arch timer\n");
+    boot_printk("[BOOT] Phase 4: CFS scheduler\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -294,9 +306,26 @@ void start_kernel(void)
 
     boot_printk("[BOOT] Timer ticks: OK (received >= 10)\n");
     boot_printk("[BOOT] Phase 3 complete\n");
-    boot_printk("[BOOT] Phase 4 will add CFS scheduler\n");
 
-    /* Phase 3 终态：计时器持续运行，挂死等待 Phase 4 */
+    /* ---- Phase 4: CFS 调度器 ---- */
+    /*
+     * 在使能 IRQ 之后初始化调度器，因为 sched_init 需要读取
+     * CNTVCT_EL0 作为时钟源（不需要中断，但验证 timer 正常后再初始化更安全）。
+     *
+     * sched_init 创建 idle 进程并初始化运行队列。
+     * 之后的 test_scheduler 创建内核线程，由 timer tick 驱动调度。
+     */
+    boot_printk("[BOOT] Initializing CFS scheduler...\n");
+    sched_init();
+    boot_printk("[BOOT] CFS scheduler initialized\n");
+
+    /* ---- Phase 4: 验证 CFS 调度器 ---- */
+    test_scheduler();
+
+    boot_printk("[BOOT] Phase 4 complete\n");
+    boot_printk("[BOOT] Phase 5 will add system calls + ELF loading\n");
+
+    /* Phase 4 终态：调度器运行中，挂死 idle 进程 */
     while (1)
-        ;
+        __asm__ volatile("wfi");
 }

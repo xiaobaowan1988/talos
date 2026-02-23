@@ -20,10 +20,14 @@
  *   - arch_timer_handler()：每 10ms 触发一次，递增 arch_timer_tick_count
  *   - arch_timer_set_next_event_ns()：设置下次中断时间（纳秒）
  *   - arch_timer_tick_count：全局 tick 计数，由 start_kernel() 轮询
+ *
+ * Phase 4 新增：
+ *   - arch_timer_handler() 调用 scheduler_tick() + schedule()，驱动 CFS 调度
  */
 
 #include <linux/types.h>
 #include <linux/irq.h>
+#include <linux/sched.h>
 
 /* ============================================================
  * 计时器控制寄存器位定义（CNTV_CTL_EL0）
@@ -111,10 +115,18 @@ static void arch_timer_handler(void)
     arch_timer_tick_count++;
 
     /*
-     * 触发调度器 tick（Phase 4 将实现 scheduler_tick()）。
-     * Phase 3 暂留空，仅验证计时器中断机制。
+     * 触发调度器 tick：更新当前进程 vruntime，判断是否需要抢占。
+     *
+     * scheduler_tick() 仅更新 vruntime 和设置 TIF_NEED_RESCHED 标志。
+     * 实际的上下文切换不在中断上下文中进行，而是：
+     *   - 内核线程主动调用 schedule()（协作式）
+     *   - 中断返回路径检查标志（Phase 5 完善）
+     *
+     * Phase 4 使用协作式调度：线程定期调用 schedule() 检查标志。
+     *
+     * 参考：kernel/time/tick-common.c tick_handle_periodic()
      */
-    /* scheduler_tick(); */
+    scheduler_tick();
 
     /* 重新设置下次中断：10ms（HZ=100）*/
     arch_timer_set_next_event_ns(10000000ULL);

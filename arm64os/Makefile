@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 5 构建系统
+# Phase 6 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2+3+4+5 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3+4+5+6 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -107,6 +107,11 @@ OBJS := \
     kernel/fork.o \
     fs/binfmt_elf.o \
     userspace/init_blob.o \
+    drivers/virtio/virtio.o \
+    drivers/virtio/virtio_mmio.o \
+    drivers/virtio/virtio_ring.o \
+    drivers/block/virtio_blk.o \
+    drivers/net/virtio_net.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -163,6 +168,18 @@ drivers/irqchip/%.o: drivers/irqchip/%.c
 drivers/timer/%.o: drivers/timer/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Phase 6: drivers/virtio/ C 文件
+drivers/virtio/%.o: drivers/virtio/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 6: drivers/block/ C 文件
+drivers/block/%.o: drivers/block/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 6: drivers/net/ C 文件
+drivers/net/%.o: drivers/net/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # Phase 5: kernel/syscall/ C 文件
 kernel/syscall/%.o: kernel/syscall/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -216,6 +233,38 @@ check-qemu:
 	    echo ">>> QEMU installed: $$($(QEMU) --version | head -1)"; \
 	fi
 
+# ---- Phase 6: 创建测试磁盘映像 ----
+#
+# 创建一个 1MB 的 RAW 磁盘映像用于 VirtIO 块设备测试。
+# 第 0 扇区写入可识别的签名 "TALOS" 以便测试验证。
+#
+DISK_IMG := disk.img
+DISK_SIZE := 1M
+
+.PHONY: disk
+disk: $(DISK_IMG)
+
+$(DISK_IMG):
+	dd if=/dev/zero of=$@ bs=$(DISK_SIZE) count=1 2>/dev/null
+	@printf 'TALOS' | dd of=$@ bs=1 conv=notrunc 2>/dev/null
+	@echo ">>> Created test disk image: $@ ($(DISK_SIZE))"
+
+# ---- QEMU 公共参数 ----
+#
+# Phase 6 新增 VirtIO 设备：
+#   -drive + -device virtio-blk-device : VirtIO 块设备（使用 disk.img）
+#   -device virtio-net-device          : VirtIO 网络设备（user 模式网络）
+#
+QEMU_COMMON := \
+    -M virt,gic-version=3 \
+    -cpu cortex-a72 \
+    -m 1G \
+    -kernel $(TARGET) \
+    -drive file=$(DISK_IMG),format=raw,if=none,id=blk0 \
+    -device virtio-blk-device,drive=blk0 \
+    -device virtio-net-device,netdev=net0 \
+    -netdev user,id=net0
+
 # ---- 运行（QEMU）----
 #
 # -M virt,gic-version=3 : ARM virt machine，使用 GIC v3 中断控制器
@@ -224,16 +273,15 @@ check-qemu:
 # -kernel               : 加载 ELF 内核镜像
 # -nographic            : 无图形界面，PL011 串口自动重定向到 stdio
 #                         （不要额外加 -serial stdio，会冲突报错）
+# -drive + -device      : VirtIO 块设备（disk.img）
+# -device + -netdev     : VirtIO 网络设备
 #
 # 退出 QEMU：Ctrl-A X
 #
 .PHONY: run
-run: check-qemu $(TARGET)
+run: check-qemu $(TARGET) $(DISK_IMG)
 	$(QEMU) \
-	    -M virt,gic-version=3 \
-	    -cpu cortex-a72 \
-	    -m 1G \
-	    -kernel $(TARGET) \
+	    $(QEMU_COMMON) \
 	    -nographic
 
 # ---- 自动化测试（带超时，适合 CI / 快速验证）----
@@ -250,13 +298,10 @@ run: check-qemu $(TARGET)
 QEMU_TIMEOUT    ?= 30
 
 .PHONY: test
-test: check-qemu $(TARGET)
-	@echo "=== Running Phase 5 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+test: check-qemu $(TARGET) $(DISK_IMG)
+	@echo "=== Running Phase 6 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) $(QEMU) \
-	    -M virt,gic-version=3 \
-	    -cpu cortex-a72 \
-	    -m 1G \
-	    -kernel $(TARGET) \
+	    $(QEMU_COMMON) \
 	    -nographic \
 	    -no-reboot 2>&1 | tee /tmp/arm64os_test.log; true
 	@echo ""
@@ -274,6 +319,10 @@ test: check-qemu $(TARGET)
 	@grep -q "Hello from user space"          /tmp/arm64os_test.log && echo "PASS: User space output"              || echo "FAIL: 'Hello from user space' not found"
 	@grep -q "syscall + ELF + user process: PASS" /tmp/arm64os_test.log && echo "PASS: Syscall + ELF test"         || echo "FAIL: 'syscall + ELF + user process: PASS' not found"
 	@grep -q "Phase 5 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 5 complete"               || echo "FAIL: 'Phase 5 complete' not found"
+	@grep -q "VirtIO blk read OK"             /tmp/arm64os_test.log && echo "PASS: VirtIO blk read OK"             || echo "FAIL: 'VirtIO blk read OK' not found"
+	@grep -q "write+read verify: PASS"        /tmp/arm64os_test.log && echo "PASS: VirtIO blk write+read verify"   || echo "FAIL: 'write+read verify: PASS' not found"
+	@grep -q "VirtIO net init OK"             /tmp/arm64os_test.log && echo "PASS: VirtIO net init OK"             || echo "FAIL: 'VirtIO net init OK' not found"
+	@grep -q "Phase 6 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 6 complete"               || echo "FAIL: 'Phase 6 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -284,14 +333,10 @@ test: check-qemu $(TARGET)
 #   (gdb) c
 #
 .PHONY: debug
-debug: check-qemu $(TARGET)
+debug: check-qemu $(TARGET) $(DISK_IMG)
 	$(QEMU) \
-	    -M virt,gic-version=3 \
-	    -cpu cortex-a72 \
-	    -m 1G \
-	    -kernel $(TARGET) \
+	    $(QEMU_COMMON) \
 	    -nographic \
-	    -serial stdio \
 	    -s -S
 
 # ---- 反汇编 ----
@@ -312,7 +357,7 @@ syms: $(TARGET)
 # ---- 清理 ----
 .PHONY: clean
 clean:
-	rm -f $(OBJS) $(TARGET) $(BINARY)
+	rm -f $(OBJS) $(TARGET) $(BINARY) $(DISK_IMG)
 	rm -f userspace/init.o userspace/init.elf
 	find . -name '*.o' -delete 2>/dev/null || true
 	@echo "Clean done."
@@ -320,7 +365,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 5 Build System"
+	@echo "arm64os Phase 6 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

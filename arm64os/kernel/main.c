@@ -31,6 +31,13 @@
  *   - 创建用户 init 进程，调度运行
  *   - 用户程序通过 SVC #0 调用 write() 和 exit()
  *
+ * Phase 6 新增：
+ *   - virtio_init()：扫描 VirtIO MMIO 总线，探测设备
+ *   - virtio_blk_init()：初始化 VirtIO 块设备驱动
+ *   - virtio_net_init()：初始化 VirtIO 网络设备驱动
+ *   - test_virtio_blk()：读写块设备验证
+ *   - test_virtio_net()：网络设备初始化验证
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
@@ -85,6 +92,13 @@ void *page_address(struct page *page);
 
 /* Phase 5：前向声明 */
 static void test_user_process(void);
+
+/* Phase 6：VirtIO 驱动框架（drivers/virtio/, drivers/block/, drivers/net/） */
+void virtio_init(void);
+int virtio_blk_init(void);
+int virtio_net_init(void);
+void test_virtio_blk(void);
+void test_virtio_net(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -243,7 +257,7 @@ void panic_unhandled(void)
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 5: syscall + ELF loader\n");
+    boot_printk("[BOOT] Phase 6: VirtIO drivers\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -358,7 +372,35 @@ void start_kernel(void)
 
     boot_printk("[BOOT] Phase 5 complete\n");
 
-    /* Phase 5 终态：调度器运行中，挂死 idle 进程 */
+    /* ---- Phase 6: VirtIO 驱动框架 ---- */
+    /*
+     * VirtIO MMIO 总线扫描 + 设备驱动初始化。
+     * 需在 GIC 已初始化、IRQ 已使能、Buddy 可用之后调用。
+     *
+     * 流程：
+     *   1. virtio_init() — 扫描 32 个 MMIO slot，探测设备
+     *   2. virtio_blk_init() — 初始化块设备（特性协商 + 队列设置）
+     *   3. virtio_net_init() — 初始化网络设备
+     *   4. 运行设备测试
+     */
+    boot_printk("[BOOT] === Phase 6: VirtIO drivers ===\n");
+
+    boot_printk("[BOOT] Scanning VirtIO MMIO bus...\n");
+    virtio_init();
+
+    boot_printk("[BOOT] Initializing VirtIO block device...\n");
+    virtio_blk_init();
+
+    boot_printk("[BOOT] Initializing VirtIO network device...\n");
+    virtio_net_init();
+
+    /* Phase 6: 验证 VirtIO 设备 */
+    test_virtio_blk();
+    test_virtio_net();
+
+    boot_printk("[BOOT] Phase 6 complete\n");
+
+    /* Phase 6 终态：调度器运行中，挂死 idle 进程 */
     while (1)
         __asm__ volatile("wfi");
 }

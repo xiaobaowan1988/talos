@@ -20,30 +20,7 @@
  */
 
 #include <linux/types.h>
-
-/* ============================================================
- * MMIO 辅助函数
- * ============================================================ */
-
-/*
- * GIC 寄存器读写使用 volatile 指针直接访问。
- * ARM64 上不需要显式内存屏障来保证 MMIO 顺序（设备内存属性已保证），
- * 但 ISB 用于确保系统寄存器操作在后续指令前生效。
- */
-static inline u32 readl(volatile void *addr)
-{
-    return *(volatile u32 *)addr;
-}
-
-static inline void writel(u32 val, volatile void *addr)
-{
-    *(volatile u32 *)addr = val;
-}
-
-static inline void writeq(u64 val, volatile void *addr)
-{
-    *(volatile u64 *)addr = val;
-}
+#include <linux/io.h>
 
 /* ============================================================
  * GICD 寄存器偏移（相对 GICD_BASE）

@@ -14,6 +14,7 @@
  * Phase 5 更新：
  *   THREAD_CPU_CONTEXT 从 112 → 120（Phase 5：新增 mm 字段）→ 128（Phase 7：新增 files 字段）
  *   → 144（Phase 10：新增 nsproxy + cgroups 字段，各 8 字节）
+ *   → 168（Phase 12：新增 seccomp_mode + seccomp_filter + landlock_domain 字段）
  *
  * struct cpu_context 布局（来自 include/linux/sched.h）：
  *   offset  0: x19
@@ -30,17 +31,18 @@
  *   offset 88: sp
  *   offset 96: pc  (返回地址)
  *
- * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread) = 144
- *   计算（Phase 10）：state(8) + flags(8) + stack(8) + pid(4) + prio(4) +
+ * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread) = 168
+ *   计算（Phase 12）：state(8) + flags(8) + stack(8) + pid(4) + prio(4) +
  *         comm(16) + mm(8) + files(8) + nsproxy(8) + cgroups(8) +
- *         sched_entity(64) = 144
+ *         seccomp_mode(4) + pad(4) + seccomp_filter(8) + landlock_domain(8) +
+ *         sched_entity(64) = 168
  */
 
 /*
  * THREAD_CPU_CONTEXT = offsetof(struct task_struct, thread)
- * Phase 10 更新：从 128 → 144（新增 nsproxy + cgroups 指针，各 8 字节）
+ * Phase 12 更新：从 144 → 168（新增 seccomp_mode(4) + pad(4) + seccomp_filter(8) + landlock_domain(8) = 24 字节）
  */
-#define THREAD_CPU_CONTEXT  144
+#define THREAD_CPU_CONTEXT  168
 
 /*
  * TASK_MM_OFFSET = offsetof(struct task_struct, mm)

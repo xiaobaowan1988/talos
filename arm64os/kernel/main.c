@@ -76,6 +76,14 @@
  *   - 测试 netfilter：注册钩子丢弃特定协议包，验证 NF_DROP 生效
  *   - 测试 nftables：添加规则匹配+过滤，验证规则引擎
  *
+ * Phase 12 新增：
+ *   - seccomp_init()：初始化 seccomp 子系统（过滤器池）
+ *   - bpf_init()：初始化 eBPF 子系统（程序池、JIT 开关）
+ *   - landlock_init()：初始化 Landlock LSM（规则集池）
+ *   - 测试 seccomp：STRICT 模式白名单过滤 + FILTER 模式 BPF 过滤器
+ *   - 测试 eBPF：加载程序、验证器检查、解释器执行、JIT 编译
+ *   - 测试 Landlock：创建规则集、添加路径规则、激活沙箱、验证访问控制
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
@@ -87,6 +95,9 @@
 #include <linux/net.h>
 #include <linux/skbuff.h>
 #include <linux/netfilter.h>
+#include <linux/seccomp.h>
+#include <linux/bpf.h>
+#include <linux/landlock.h>
 #include <asm/memory.h>
 
 /* 由 printk.c 提供 */
@@ -176,6 +187,13 @@ static void test_phase10(void);
 void nft_init(void);
 void inet_init(void);
 static void test_phase11(void);
+
+/* Phase 12：seccomp + eBPF JIT + Landlock LSM */
+/* seccomp_init() 定义在 seccomp.h */
+/* bpf_init() 定义在 bpf.h */
+/* landlock_init() 定义在 landlock.h */
+extern struct task_struct *current_task;  /* kernel/sched/core.c */
+static void test_phase12(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -334,7 +352,7 @@ void panic_unhandled(void)
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 11: TCP/IP + netfilter\n");
+    boot_printk("[BOOT] Phase 12: seccomp + eBPF JIT + Landlock\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -588,7 +606,36 @@ void start_kernel(void)
 
     boot_printk("[BOOT] Phase 11 complete\n");
 
-    /* Phase 11 终态：调度器运行中，挂死 idle 进程 */
+    /* ---- Phase 12: seccomp + eBPF JIT + Landlock LSM ---- */
+    /*
+     * Phase 12 初始化顺序：
+     *   1. seccomp_init() — 初始化 seccomp 过滤器池
+     *   2. bpf_init() — 初始化 eBPF 程序池
+     *   3. landlock_init() — 初始化 Landlock 规则集池
+     *   4. 启用 eBPF JIT（bpf_jit_enable = 1）
+     *   5. 运行验证测试：seccomp、eBPF、Landlock
+     */
+    boot_printk("[BOOT] === Phase 12: seccomp + eBPF JIT + Landlock ===\n");
+
+    boot_printk("[BOOT] Initializing seccomp...\n");
+    seccomp_init();
+
+    boot_printk("[BOOT] Initializing eBPF...\n");
+    bpf_init();
+
+    boot_printk("[BOOT] Initializing Landlock LSM...\n");
+    landlock_init();
+
+    /* 启用 JIT 编译 */
+    bpf_jit_enable = 1;
+    boot_printk("[bpf] JIT enabled\n");
+
+    /* 运行 Phase 12 测试 */
+    test_phase12();
+
+    boot_printk("[BOOT] Phase 12 complete\n");
+
+    /* Phase 12 终态：调度器运行中，挂死 idle 进程 */
     while (1)
         __asm__ volatile("wfi");
 }
@@ -2060,4 +2107,446 @@ static void test_phase11(void)
     }
 
     boot_printk("[BOOT] Phase 11 TCP/IP + netfilter tests: all passed\n");
+}
+
+/*
+ * ============================================================
+ * Phase 12: seccomp + eBPF JIT + Landlock LSM 验证
+ *
+ * 三个测试：
+ *   1. seccomp — STRICT 模式白名单 + FILTER 模式 BPF 过滤器
+ *   2. eBPF — 程序加载、验证器、解释器执行、JIT 编译
+ *   3. Landlock — 规则集创建、路径规则、沙箱激活、访问控制
+ *
+ * 参考：§12.5 验证方法
+ * ============================================================
+ */
+static void test_phase12(void)
+{
+    boot_printk("[BOOT] Phase 12 security tests starting...\n");
+
+    /* ============================================================
+     * Test 1: seccomp — 系统调用过滤
+     *
+     * 参考：§12.1 seccomp
+     *
+     * 1a. STRICT 模式：只允许 read/write/exit/exit_group
+     * 1b. FILTER 模式：BPF 过滤器（允许 write + exit，拒绝其他）
+     * ============================================================
+     */
+    boot_printk("[p12-test] === seccomp test ===\n");
+    {
+        struct seccomp_data sd;
+        int ret;
+
+        /*
+         * Test 1a: STRICT 模式
+         *
+         * 设置当前进程为 STRICT 模式，验证：
+         *   - write(64) → 允许（返回 0）
+         *   - read(63) → 允许（返回 0）
+         *   - openat(56) → 拒绝（返回负数）
+         */
+        boot_printk("[p12-test] seccomp STRICT mode...\n");
+
+        /* 保存并设置 STRICT */
+        current_task->seccomp_mode = SECCOMP_MODE_DISABLED;
+        current_task->seccomp_filter = NULL;
+
+        ret = seccomp_set_mode_strict();
+        if (ret != 0) {
+            boot_printk("[p12-test] FAIL: seccomp_set_mode_strict\n");
+            return;
+        }
+
+        /* 验证 write(64) 被允许 */
+        sd.nr = 64;  /* __NR_write */
+        sd.arch = AUDIT_ARCH_AARCH64;
+        sd.args[0] = 1;
+        sd.args[1] = 0;
+        sd.args[2] = 0;
+        sd.args[3] = 0;
+        sd.args[4] = 0;
+        sd.args[5] = 0;
+        sd.instruction_pointer = 0;
+
+        ret = __secure_computing(&sd);
+        if (ret != 0) {
+            boot_printk("[p12-test] FAIL: STRICT rejected write\n");
+            return;
+        }
+        boot_printk("[p12-test] STRICT: write allowed: OK\n");
+
+        /* 验证 read(63) 被允许 */
+        sd.nr = 63;  /* __NR_read */
+        ret = __secure_computing(&sd);
+        if (ret != 0) {
+            boot_printk("[p12-test] FAIL: STRICT rejected read\n");
+            return;
+        }
+        boot_printk("[p12-test] STRICT: read allowed: OK\n");
+
+        /* 验证 openat(56) 被拒绝 */
+        sd.nr = 56;  /* __NR_openat */
+        ret = __secure_computing(&sd);
+        if (ret == 0) {
+            boot_printk("[p12-test] FAIL: STRICT allowed openat\n");
+            return;
+        }
+        boot_printk("[p12-test] STRICT: openat blocked: OK\n");
+
+        /*
+         * Test 1b: FILTER 模式（BPF 过滤器）
+         *
+         * 安装 cBPF 过滤器：
+         *   - 加载系统调用号到累加器
+         *   - 允许 write(64) 和 exit(93)
+         *   - 其他返回 SECCOMP_RET_ERRNO | EPERM
+         */
+        boot_printk("[p12-test] seccomp FILTER mode...\n");
+
+        /* 重置为 DISABLED 以安装 FILTER */
+        current_task->seccomp_mode = SECCOMP_MODE_DISABLED;
+        current_task->seccomp_filter = NULL;
+
+        {
+            struct sock_filter filter[5];
+            struct sock_fprog fprog;
+
+            /* [0] 加载系统调用号到累加器 A */
+            filter[0].code = BPF_LD | BPF_W | BPF_ABS;
+            filter[0].jt = 0;
+            filter[0].jf = 0;
+            filter[0].k = offsetof(struct seccomp_data, nr);
+
+            /* [1] if A == 64 (write) goto +2 (allow) else +0 (next) */
+            filter[1].code = BPF_JMP | BPF_JEQ | BPF_K;
+            filter[1].jt = 2;
+            filter[1].jf = 0;
+            filter[1].k = 64;
+
+            /* [2] if A == 93 (exit) goto +1 (allow) else +0 (deny) */
+            filter[2].code = BPF_JMP | BPF_JEQ | BPF_K;
+            filter[2].jt = 1;
+            filter[2].jf = 0;
+            filter[2].k = 93;
+
+            /* [3] deny: return ERRNO(1) */
+            filter[3].code = BPF_RET | BPF_K;
+            filter[3].jt = 0;
+            filter[3].jf = 0;
+            filter[3].k = SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA);
+
+            /* [4] allow: return ALLOW */
+            filter[4].code = BPF_RET | BPF_K;
+            filter[4].jt = 0;
+            filter[4].jf = 0;
+            filter[4].k = SECCOMP_RET_ALLOW;
+
+            fprog.len = 5;
+            fprog.filter = filter;
+
+            ret = seccomp_set_mode_filter(&fprog);
+            if (ret != 0) {
+                boot_printk("[p12-test] FAIL: seccomp_set_mode_filter\n");
+                return;
+            }
+        }
+
+        /* 验证 write(64) 被允许 */
+        sd.nr = 64;
+        ret = __secure_computing(&sd);
+        if (ret != 0) {
+            boot_printk("[p12-test] FAIL: FILTER rejected write\n");
+            return;
+        }
+        boot_printk("[p12-test] FILTER: write allowed: OK\n");
+
+        /* 验证 exit(93) 被允许 */
+        sd.nr = 93;
+        ret = __secure_computing(&sd);
+        if (ret != 0) {
+            boot_printk("[p12-test] FAIL: FILTER rejected exit\n");
+            return;
+        }
+        boot_printk("[p12-test] FILTER: exit allowed: OK\n");
+
+        /* 验证 openat(56) 被拒绝 */
+        sd.nr = 56;
+        ret = __secure_computing(&sd);
+        if (ret == 0) {
+            boot_printk("[p12-test] FAIL: FILTER allowed openat\n");
+            return;
+        }
+        boot_printk("[p12-test] FILTER: openat blocked (EPERM): OK\n");
+
+        /* 验证 read(63) 被拒绝（FILTER 模式只允许 write+exit）*/
+        sd.nr = 63;
+        ret = __secure_computing(&sd);
+        if (ret == 0) {
+            boot_printk("[p12-test] FAIL: FILTER allowed read\n");
+            return;
+        }
+        boot_printk("[p12-test] FILTER: read blocked (EPERM): OK\n");
+
+        /* 清理 */
+        current_task->seccomp_mode = SECCOMP_MODE_DISABLED;
+        current_task->seccomp_filter = NULL;
+
+        boot_printk("[p12-test] seccomp: PASS\n");
+    }
+
+    /* ============================================================
+     * Test 2: eBPF — 程序加载 + 验证器 + 解释器 + JIT
+     *
+     * 参考：§12.2 eBPF架构与JIT编译
+     *
+     * 2a. 加载简单 eBPF 程序：r0 = r1 + 42，验证解释器执行
+     * 2b. JIT 编译同一程序，验证 JIT 成功
+     * 2c. 验证器拒绝非法程序（无 EXIT 指令）
+     * ============================================================
+     */
+    boot_printk("[p12-test] === eBPF test ===\n");
+    {
+        /*
+         * Test 2a: 加载并运行 eBPF 程序
+         *
+         * 程序逻辑（伪代码）：
+         *   r0 = *(u32 *)(r1 + 0)    // 从上下文读取第一个 u32
+         *   r0 += 42                  // 加 42
+         *   exit                      // 返回 r0
+         */
+        struct bpf_insn prog_insns[3];
+        struct bpf_attr attr;
+        int prog_fd;
+        u32 test_ctx;
+        struct ebpf_prog *prog;
+
+        /* r0 = *(u32 *)(r1 + 0) : LDX_MEM(W) */
+        prog_insns[0].code = EBPF_CLS_LDX | 0x00 | EBPF_MEM;
+        prog_insns[0].dst_reg = BPF_REG_0;
+        prog_insns[0].src_reg = BPF_REG_1;
+        prog_insns[0].off = 0;
+        prog_insns[0].imm = 0;
+
+        /* r0 += 42 : ALU64_IMM(ADD) */
+        prog_insns[1].code = EBPF_CLS_ALU64 | EBPF_ADD | EBPF_K;
+        prog_insns[1].dst_reg = BPF_REG_0;
+        prog_insns[1].src_reg = 0;
+        prog_insns[1].off = 0;
+        prog_insns[1].imm = 42;
+
+        /* exit */
+        prog_insns[2].code = EBPF_CLS_JMP | EBPF_EXIT;
+        prog_insns[2].dst_reg = 0;
+        prog_insns[2].src_reg = 0;
+        prog_insns[2].off = 0;
+        prog_insns[2].imm = 0;
+
+        /* 先用解释器测试 */
+        bpf_jit_enable = 0;
+
+        attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
+        attr.insn_cnt = 3;
+        attr.insns = prog_insns;
+
+        prog_fd = sys_bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+        if (prog_fd < 0) {
+            boot_printk("[p12-test] FAIL: BPF_PROG_LOAD (interp)\n");
+            return;
+        }
+        boot_printk("[p12-test] eBPF program loaded (interp): OK\n");
+
+        /* 运行程序：ctx = { .value = 100 } → expect 100 + 42 = 142 */
+        test_ctx = 100;
+        attr.prog_fd = (u32)prog_fd;
+        attr.data_in = &test_ctx;
+        attr.data_size_in = sizeof(test_ctx);
+        attr.retval = 0;
+
+        if (sys_bpf(BPF_PROG_RUN, &attr, sizeof(attr)) != 0) {
+            boot_printk("[p12-test] FAIL: BPF_PROG_RUN (interp)\n");
+            return;
+        }
+
+        if (attr.retval == 142) {
+            boot_printk("[p12-test] eBPF interp result=142: OK\n");
+        } else {
+            boot_printk("[p12-test] FAIL: eBPF interp result=");
+            boot_printk_hex((unsigned long)attr.retval);
+            boot_printk(" (expect 142)\n");
+            return;
+        }
+
+        /*
+         * Test 2b: JIT 编译
+         *
+         * 重新加载相同程序，但启用 JIT。
+         * 验证 JIT 编译成功（prog->jit_done = true）。
+         * 注意：在 QEMU 中实际执行 JIT 代码需要 icache 刷新，
+         * 此处验证 JIT 编译流程本身。
+         */
+        boot_printk("[p12-test] enabling JIT...\n");
+        bpf_jit_enable = 1;
+
+        attr.insn_cnt = 3;
+        attr.insns = prog_insns;
+
+        prog_fd = sys_bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+        if (prog_fd < 0) {
+            boot_printk("[p12-test] FAIL: BPF_PROG_LOAD (JIT)\n");
+            return;
+        }
+
+        prog = bpf_prog_get(prog_fd);
+        if (prog && prog->jit_done) {
+            boot_printk("[p12-test] JIT compiled: OK (");
+            boot_printk_hex((unsigned long)prog->jit_size);
+            boot_printk(" bytes)\n");
+        } else {
+            boot_printk("[p12-test] FAIL: JIT not done\n");
+            return;
+        }
+
+        /*
+         * Test 2c: 验证器拒绝非法程序
+         *
+         * 非法程序：没有 EXIT 指令。
+         */
+        {
+            struct bpf_insn bad_prog[1];
+            struct bpf_attr bad_attr;
+            int bad_fd;
+
+            /* MOV64_IMM r0, 0 — 没有 EXIT */
+            bad_prog[0].code = EBPF_CLS_ALU64 | EBPF_MOV | EBPF_K;
+            bad_prog[0].dst_reg = BPF_REG_0;
+            bad_prog[0].src_reg = 0;
+            bad_prog[0].off = 0;
+            bad_prog[0].imm = 0;
+
+            bad_attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
+            bad_attr.insn_cnt = 1;
+            bad_attr.insns = bad_prog;
+
+            bad_fd = sys_bpf(BPF_PROG_LOAD, &bad_attr, sizeof(bad_attr));
+            if (bad_fd < 0) {
+                boot_printk("[p12-test] verifier rejected bad prog: OK\n");
+            } else {
+                boot_printk("[p12-test] FAIL: verifier accepted bad prog\n");
+                return;
+            }
+        }
+
+        boot_printk("[p12-test] eBPF: PASS\n");
+    }
+
+    /* ============================================================
+     * Test 3: Landlock — 文件系统沙箱
+     *
+     * 参考：§12.3 Landlock LSM
+     *
+     * 3a. 创建规则集（限制文件读写）
+     * 3b. 添加规则：允许读 /etc，允许读写 /tmp
+     * 3c. 激活沙箱
+     * 3d. 验证 /etc 可读
+     * 3e. 验证 /etc 不可写
+     * 3f. 验证 /tmp 可写
+     * 3g. 验证 /home 不可访问
+     * ============================================================
+     */
+    boot_printk("[p12-test] === Landlock test ===\n");
+    {
+        struct landlock_ruleset_attr rs_attr;
+        int ruleset_fd;
+        int ret;
+
+        /* 创建规则集：限制读文件、写文件、读目录 */
+        rs_attr.handled_access_fs =
+            LANDLOCK_ACCESS_FS_READ_FILE  |
+            LANDLOCK_ACCESS_FS_WRITE_FILE |
+            LANDLOCK_ACCESS_FS_READ_DIR;
+        rs_attr.handled_access_net = 0;
+
+        ruleset_fd = landlock_create_ruleset(&rs_attr, sizeof(rs_attr), 0);
+        if (ruleset_fd < 0) {
+            boot_printk("[p12-test] FAIL: landlock_create_ruleset\n");
+            return;
+        }
+        boot_printk("[p12-test] ruleset created: OK\n");
+
+        /* 添加规则：允许读 /etc */
+        ret = landlock_add_path_rule(ruleset_fd, "/etc",
+                                     LANDLOCK_ACCESS_FS_READ_FILE |
+                                     LANDLOCK_ACCESS_FS_READ_DIR);
+        if (ret != 0) {
+            boot_printk("[p12-test] FAIL: add /etc rule\n");
+            return;
+        }
+
+        /* 添加规则：允许读写 /tmp */
+        ret = landlock_add_path_rule(ruleset_fd, "/tmp",
+                                     LANDLOCK_ACCESS_FS_READ_FILE  |
+                                     LANDLOCK_ACCESS_FS_WRITE_FILE |
+                                     LANDLOCK_ACCESS_FS_READ_DIR);
+        if (ret != 0) {
+            boot_printk("[p12-test] FAIL: add /tmp rule\n");
+            return;
+        }
+        boot_printk("[p12-test] rules added (/etc=RO, /tmp=RW): OK\n");
+
+        /* 激活沙箱 */
+        ret = landlock_restrict_self(ruleset_fd, 0);
+        if (ret != 0) {
+            boot_printk("[p12-test] FAIL: landlock_restrict_self\n");
+            return;
+        }
+
+        /* 验证 /etc/hostname 可读 */
+        ret = landlock_file_open("/etc/hostname",
+                                 LANDLOCK_ACCESS_FS_READ_FILE);
+        if (ret == 0) {
+            boot_printk("[p12-test] read /etc/hostname: allowed: OK\n");
+        } else {
+            boot_printk("[p12-test] FAIL: /etc/hostname read denied\n");
+            return;
+        }
+
+        /* 验证 /etc/shadow 不可写 */
+        ret = landlock_file_open("/etc/shadow",
+                                 LANDLOCK_ACCESS_FS_WRITE_FILE);
+        if (ret != 0) {
+            boot_printk("[p12-test] write /etc/shadow: blocked: OK\n");
+        } else {
+            boot_printk("[p12-test] FAIL: /etc/shadow write allowed\n");
+            return;
+        }
+
+        /* 验证 /tmp/data 可写 */
+        ret = landlock_file_open("/tmp/data",
+                                 LANDLOCK_ACCESS_FS_WRITE_FILE);
+        if (ret == 0) {
+            boot_printk("[p12-test] write /tmp/data: allowed: OK\n");
+        } else {
+            boot_printk("[p12-test] FAIL: /tmp/data write denied\n");
+            return;
+        }
+
+        /* 验证 /home/user 不可访问 */
+        ret = landlock_file_open("/home/user",
+                                 LANDLOCK_ACCESS_FS_READ_FILE);
+        if (ret != 0) {
+            boot_printk("[p12-test] read /home/user: blocked: OK\n");
+        } else {
+            boot_printk("[p12-test] FAIL: /home/user access allowed\n");
+            return;
+        }
+
+        /* 清理：解除沙箱（仅为测试方便，真实实现不可逆）*/
+        current_task->landlock_domain = NULL;
+
+        boot_printk("[p12-test] Landlock: PASS\n");
+    }
+
+    boot_printk("[BOOT] Phase 12 seccomp + eBPF + Landlock tests: all passed\n");
 }

@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 11 构建系统
+# Phase 12 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2+3+4+5+6+7+8+9+10+11 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3+4+5+6+7+8+9+10+11+12 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -152,6 +152,14 @@ OBJS := \
     net/ipv4/tcp_output.o \
     net/netfilter/core.o \
     net/netfilter/nf_tables_core.o \
+    kernel/seccomp.o \
+    kernel/bpf/core.o \
+    kernel/bpf/verifier.o \
+    kernel/bpf/syscall.o \
+    arch/arm64/net/bpf_jit_comp.o \
+    security/landlock/ruleset.o \
+    security/landlock/fs.o \
+    security/landlock/net.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -262,6 +270,18 @@ net/ipv4/%.o: net/ipv4/%.c
 
 # Phase 11: net/netfilter/ C 文件
 net/netfilter/%.o: net/netfilter/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 12: kernel/bpf/ C 文件
+kernel/bpf/%.o: kernel/bpf/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 12: arch/arm64/net/ C 文件
+arch/arm64/net/%.o: arch/arm64/net/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 12: security/landlock/ C 文件
+security/landlock/%.o: security/landlock/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---- 编译 C 文件 ----
@@ -375,7 +395,7 @@ QEMU_TIMEOUT    ?= 30
 
 .PHONY: test
 test: check-qemu $(TARGET) $(DISK_IMG)
-	@echo "=== Running Phase 11 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@echo "=== Running Phase 12 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) $(QEMU) \
 	    $(QEMU_COMMON) \
 	    -nographic \
@@ -424,6 +444,10 @@ test: check-qemu $(TARGET) $(DISK_IMG)
 	@grep -q "netfilter hook: PASS"         /tmp/arm64os_test.log && echo "PASS: netfilter hook"                  || echo "FAIL: 'netfilter hook: PASS' not found"
 	@grep -q "nftables rule: PASS"          /tmp/arm64os_test.log && echo "PASS: nftables rule"                   || echo "FAIL: 'nftables rule: PASS' not found"
 	@grep -q "Phase 11 complete"            /tmp/arm64os_test.log && echo "PASS: Phase 11 complete"               || echo "FAIL: 'Phase 11 complete' not found"
+	@grep -q "seccomp: PASS"               /tmp/arm64os_test.log && echo "PASS: seccomp"                         || echo "FAIL: 'seccomp: PASS' not found"
+	@grep -q "eBPF: PASS"                  /tmp/arm64os_test.log && echo "PASS: eBPF"                            || echo "FAIL: 'eBPF: PASS' not found"
+	@grep -q "Landlock: PASS"              /tmp/arm64os_test.log && echo "PASS: Landlock"                        || echo "FAIL: 'Landlock: PASS' not found"
+	@grep -q "Phase 12 complete"           /tmp/arm64os_test.log && echo "PASS: Phase 12 complete"               || echo "FAIL: 'Phase 12 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -466,7 +490,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 11 Build System"
+	@echo "arm64os Phase 12 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

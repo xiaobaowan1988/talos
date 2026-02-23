@@ -44,6 +44,14 @@
  *   - do_mount()：挂载 ramfs 到根目录
  *   - test_vfs()：创建文件、写入、读取、验证 dcache 命中
  *
+ * Phase 8 新增：
+ *   - squashfs_init()：注册 squashfs 文件系统
+ *   - xfs_init()：注册 XFS 文件系统
+ *   - squashfs_mkfs_test()：在磁盘上构建 squashfs 测试镜像
+ *   - xfs_mkfs()：格式化 XFS 分区
+ *   - 挂载 squashfs 到 /sq，XFS 到 /xfs
+ *   - 读取 squashfs 只读文件，XFS 文件创建/读写验证
+ *
  * 注：handle_irq() 已移至 kernel/irq/handle.c（Phase 3）
  */
 
@@ -118,6 +126,13 @@ ssize_t vfs_write(struct file *filp, const char *buf, size_t count);
 struct file *fget(struct files_struct *files, int fd);
 extern struct files_struct init_files;
 static void test_vfs(void);
+
+/* Phase 8：squashfs + XFS（fs/squashfs/, fs/xfs/） */
+void squashfs_init(void);
+void squashfs_mkfs_test(void);
+void xfs_init(void);
+void xfs_mkfs(void);
+static void test_phase8(void);
 
 /* 由 linker script 定义的符号 */
 extern char _text[];
@@ -276,7 +291,7 @@ void panic_unhandled(void)
 void start_kernel(void)
 {
     boot_printk("[BOOT] ARM64 kernel starting...\n");
-    boot_printk("[BOOT] Phase 7: VFS + dentry cache\n");
+    boot_printk("[BOOT] Phase 8: squashfs + XFS\n");
 
     /* 打印内核镜像布局 */
     boot_printk("[BOOT] Kernel text   : ");
@@ -443,7 +458,30 @@ void start_kernel(void)
 
     boot_printk("[BOOT] Phase 7 complete\n");
 
-    /* Phase 7 终态：调度器运行中，挂死 idle 进程 */
+    /* ---- Phase 8: squashfs 只读层 + XFS 日志文件系统 ---- */
+    /*
+     * Phase 8 初始化顺序：
+     *   1. 注册 squashfs 和 XFS 文件系统类型
+     *   2. 构建 squashfs 测试镜像（写入磁盘）
+     *   3. 格式化 XFS 分区
+     *   4. 挂载 squashfs 到 /sq
+     *   5. 挂载 XFS 到 /xfs
+     *   6. 运行验证测试
+     */
+    boot_printk("[BOOT] === Phase 8: squashfs + XFS ===\n");
+
+    boot_printk("[BOOT] Registering squashfs...\n");
+    squashfs_init();
+
+    boot_printk("[BOOT] Registering XFS...\n");
+    xfs_init();
+
+    /* 运行 Phase 8 测试 */
+    test_phase8();
+
+    boot_printk("[BOOT] Phase 8 complete\n");
+
+    /* Phase 8 终态：调度器运行中，挂死 idle 进程 */
     while (1)
         __asm__ volatile("wfi");
 }
@@ -776,4 +814,161 @@ static void test_vfs(void)
     }
 
     boot_printk("[BOOT] VFS + dentry cache: all tests passed\n");
+}
+
+/*
+ * ============================================================
+ * Phase 8: squashfs + XFS 验证
+ *
+ * 流程：
+ *   1. 构建 squashfs 测试镜像
+ *   2. 挂载 squashfs 到 /sq
+ *   3. 读取 /sq/hello.txt 并验证内容
+ *   4. 格式化 XFS 分区
+ *   5. 挂载 XFS 到 /xfs
+ *   6. 在 /xfs 中创建文件，写入数据
+ *   7. 重新打开读取并验证
+ *
+ * 参考：Phase 8 设计文档 §8.9
+ * ============================================================
+ */
+static void test_phase8(void)
+{
+    int fd;
+    char buf[64];
+    ssize_t n;
+    struct file *filp;
+    int i;
+
+    boot_printk("[BOOT] === Phase 8: filesystem test ===\n");
+
+    /* === squashfs 测试 === */
+
+    /* 1. 在磁盘上构建 squashfs 测试镜像 */
+    squashfs_mkfs_test();
+
+    /* 2. 挂载 squashfs 到 /sq */
+    boot_printk("[p8-test] Mounting squashfs on /sq...\n");
+    if (do_mount("none", "/sq", "squashfs", 0, NULL) != 0) {
+        boot_printk("[p8-test] FAIL: mount squashfs\n");
+        return;
+    }
+
+    /* 3. 读取 /sq/hello.txt */
+    boot_printk("[p8-test] Opening /sq/hello.txt...\n");
+    fd = do_sys_open(&init_files, "/sq/hello.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        boot_printk("[p8-test] FAIL: open /sq/hello.txt, err=");
+        boot_printk_hex((unsigned long)fd);
+        boot_printk("\n");
+        return;
+    }
+
+    filp = fget(&init_files, fd);
+    if (!filp) {
+        boot_printk("[p8-test] FAIL: fget returned NULL\n");
+        return;
+    }
+
+    for (i = 0; i < 64; i++)
+        buf[i] = 0;
+
+    n = vfs_read(filp, buf, 64);
+    do_sys_close(&init_files, fd);
+
+    boot_printk("[p8-test] squashfs read: ");
+    boot_printk_hex((unsigned long)n);
+    boot_printk(" bytes\n");
+
+    /* 验证内容 == "squashfs works!\n" (16 bytes) */
+    if (n == 16 && vfs_str_equal(buf, "squashfs works!\n", 16)) {
+        boot_printk("[p8-test] squashfs read: PASS\n");
+    } else {
+        boot_printk("[p8-test] FAIL: squashfs content mismatch\n");
+        buf[16] = '\0';
+        boot_printk("[p8-test] got: ");
+        boot_printk(buf);
+        boot_printk("\n");
+        return;
+    }
+
+    /* 4. 读取第二个文件 /sq/readme.txt */
+    fd = do_sys_open(&init_files, "/sq/readme.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        boot_printk("[p8-test] FAIL: open /sq/readme.txt\n");
+        return;
+    }
+
+    filp = fget(&init_files, fd);
+    for (i = 0; i < 64; i++)
+        buf[i] = 0;
+    n = vfs_read(filp, buf, 64);
+    do_sys_close(&init_files, fd);
+
+    if (n == 13 && vfs_str_equal(buf, "read-only fs\n", 13)) {
+        boot_printk("[p8-test] squashfs readme: PASS\n");
+    } else {
+        boot_printk("[p8-test] FAIL: squashfs readme mismatch\n");
+        return;
+    }
+
+    /* === XFS 测试 === */
+
+    /* 5. 格式化 XFS */
+    xfs_mkfs();
+
+    /* 6. 挂载 XFS 到 /xfs */
+    boot_printk("[p8-test] Mounting XFS on /xfs...\n");
+    if (do_mount("none", "/xfs", "xfs", 0, NULL) != 0) {
+        boot_printk("[p8-test] FAIL: mount XFS\n");
+        return;
+    }
+
+    /* 7. 创建文件并写入 */
+    boot_printk("[p8-test] Creating /xfs/test.txt...\n");
+    fd = do_sys_open(&init_files, "/xfs/test.txt",
+                     O_CREAT | O_WRONLY, 0644);
+    if (fd < 0) {
+        boot_printk("[p8-test] FAIL: open /xfs/test.txt, err=");
+        boot_printk_hex((unsigned long)fd);
+        boot_printk("\n");
+        return;
+    }
+
+    filp = fget(&init_files, fd);
+    n = vfs_write(filp, "XFS WAL test\n", 13);
+    do_sys_close(&init_files, fd);
+
+    boot_printk("[p8-test] XFS write: ");
+    boot_printk_hex((unsigned long)n);
+    boot_printk(" bytes\n");
+
+    if (n != 13) {
+        boot_printk("[p8-test] FAIL: XFS write\n");
+        return;
+    }
+
+    /* 8. 重新打开并读取验证 */
+    fd = do_sys_open(&init_files, "/xfs/test.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        boot_printk("[p8-test] FAIL: reopen /xfs/test.txt\n");
+        return;
+    }
+
+    filp = fget(&init_files, fd);
+    for (i = 0; i < 64; i++)
+        buf[i] = 0;
+    n = vfs_read(filp, buf, 64);
+    do_sys_close(&init_files, fd);
+
+    if (n == 13 && vfs_str_equal(buf, "XFS WAL test\n", 13)) {
+        boot_printk("[p8-test] XFS write+read: PASS\n");
+    } else {
+        boot_printk("[p8-test] FAIL: XFS content mismatch (read ");
+        boot_printk_hex((unsigned long)n);
+        boot_printk(" bytes)\n");
+        return;
+    }
+
+    boot_printk("[BOOT] Phase 8 filesystem tests: all passed\n");
 }

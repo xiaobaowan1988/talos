@@ -1,6 +1,6 @@
 # arm64os/Makefile
 #
-# Phase 7 构建系统
+# Phase 8 构建系统
 #
 # 用法：
 #   make            — 编译内核 ELF（自动选择工具链）
@@ -85,7 +85,7 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1+2+3+4+5+6+7 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# Phase 1+2+3+4+5+6+7+8 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
@@ -118,6 +118,16 @@ OBJS := \
     fs/vfs/file.o \
     fs/vfs/namei.o \
     fs/ramfs/ramfs.o \
+    fs/squashfs/super.o \
+    fs/squashfs/inode.o \
+    fs/squashfs/dir.o \
+    fs/squashfs/file.o \
+    fs/squashfs/decompressor.o \
+    fs/xfs/xfs_super.o \
+    fs/xfs/xfs_log.o \
+    fs/xfs/xfs_inode.o \
+    fs/xfs/xfs_alloc.o \
+    fs/xfs/xfs_dir2.o \
     kernel/main.o
 
 TARGET  := arm64os.elf
@@ -202,6 +212,14 @@ fs/vfs/%.o: fs/vfs/%.c
 fs/ramfs/%.o: fs/ramfs/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Phase 8: fs/squashfs/ C 文件
+fs/squashfs/%.o: fs/squashfs/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Phase 8: fs/xfs/ C 文件
+fs/xfs/%.o: fs/xfs/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # ---- 编译 C 文件 ----
 kernel/%.o: kernel/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -247,13 +265,13 @@ check-qemu:
 	    echo ">>> QEMU installed: $$($(QEMU) --version | head -1)"; \
 	fi
 
-# ---- Phase 6: 创建测试磁盘映像 ----
+# ---- Phase 6+8: 创建测试磁盘映像 ----
 #
-# 创建一个 1MB 的 RAW 磁盘映像用于 VirtIO 块设备测试。
+# Phase 8 扩展到 8MB：squashfs (2MB) + XFS (5MB) 分区。
 # 第 0 扇区写入可识别的签名 "TALOS" 以便测试验证。
 #
 DISK_IMG := disk.img
-DISK_SIZE := 1M
+DISK_SIZE := 8M
 
 .PHONY: disk
 disk: $(DISK_IMG)
@@ -313,7 +331,7 @@ QEMU_TIMEOUT    ?= 30
 
 .PHONY: test
 test: check-qemu $(TARGET) $(DISK_IMG)
-	@echo "=== Running Phase 7 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
+	@echo "=== Running Phase 8 in QEMU (timeout $(QEMU_TIMEOUT)s) ==="
 	@timeout $(QEMU_TIMEOUT) $(QEMU) \
 	    $(QEMU_COMMON) \
 	    -nographic \
@@ -342,6 +360,9 @@ test: check-qemu $(TARGET) $(DISK_IMG)
 	@grep -q "VFS test OK"                    /tmp/arm64os_test.log && echo "PASS: VFS test OK"                    || echo "FAIL: 'VFS test OK' not found"
 	@grep -q "dcache hit: PASS"               /tmp/arm64os_test.log && echo "PASS: dcache hit"                     || echo "FAIL: 'dcache hit: PASS' not found"
 	@grep -q "Phase 7 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 7 complete"               || echo "FAIL: 'Phase 7 complete' not found"
+	@grep -q "squashfs read: PASS"            /tmp/arm64os_test.log && echo "PASS: squashfs read"                  || echo "FAIL: 'squashfs read: PASS' not found"
+	@grep -q "XFS write+read: PASS"           /tmp/arm64os_test.log && echo "PASS: XFS write+read"                || echo "FAIL: 'XFS write+read: PASS' not found"
+	@grep -q "Phase 8 complete"               /tmp/arm64os_test.log && echo "PASS: Phase 8 complete"               || echo "FAIL: 'Phase 8 complete' not found"
 	@echo "--------------------"
 
 # ---- 带 GDB 调试的运行 ----
@@ -384,7 +405,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 7 Build System"
+	@echo "arm64os Phase 8 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

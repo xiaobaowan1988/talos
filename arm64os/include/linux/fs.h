@@ -290,7 +290,7 @@ struct file_system_type {
  * ============================================================
  * vfsmount - 挂载点信息
  *
- * 记录文件系统的挂载信息。Phase 7 简化版：仅支持根挂载。
+ * 记录文件系统的挂载信息。
  *
  * 参考：include/linux/mount.h struct vfsmount
  * ============================================================
@@ -298,6 +298,26 @@ struct file_system_type {
 struct vfsmount {
     struct dentry  *mnt_root;                   /* 挂载文件系统的根 dentry */
     struct super_block *mnt_sb;                 /* 挂载文件系统的超级块 */
+};
+
+/*
+ * ============================================================
+ * mount_entry - 挂载点表项
+ *
+ * Phase 8 增强：支持多挂载点。
+ * 维护全局挂载表，路径解析时检查挂载点。
+ *
+ * 参考：fs/namespace.c struct mount
+ * ============================================================
+ */
+#define MAX_MOUNTS          8
+#define MAX_MNT_PATH        32
+
+struct mount_entry {
+    char            mnt_path[MAX_MNT_PATH]; /* 挂载路径（如 "/sq"）*/
+    int             mnt_pathlen;            /* 路径长度 */
+    struct vfsmount mnt;                    /* 挂载信息 */
+    int             used;                   /* 是否已使用 */
 };
 
 /*
@@ -347,5 +367,9 @@ struct dentry *path_lookup_create(const char *pathname, struct dentry **parent_o
 /* --- 全局根文件系统 --- */
 extern struct vfsmount *root_mnt;
 extern struct files_struct init_files;
+extern struct mount_entry mount_table[MAX_MOUNTS];
+
+/* --- 挂载点查找 --- */
+struct mount_entry *find_mount(const char *path);
 
 #endif /* __LINUX_FS_H */

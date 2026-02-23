@@ -11,18 +11,15 @@
  *   - path_lookup_create()：解析路径名，返回父 dentry 和末尾分量
  *   - walk_component()：解析路径中的一个分量
  *
- * 路径解析是 VFS 最核心的操作之一：
- *   open("/etc/passwd") →
- *     1. 从根 dentry 开始
- *     2. 解析 "etc"：dcache lookup → 如果 miss 则 inode->i_op->lookup()
- *     3. 解析 "passwd"：同上
- *     4. 返回 "passwd" 的 dentry
+ * Phase 8 增强：
+ *   - path_lookup() 在解析前检查挂载表
+ *   - 如果路径匹配某个非根挂载点，从该挂载点的 dentry 树开始解析
+ *   - 例如 "/sq/hello.txt" → 在 squashfs 的 dentry 树中查找 "hello.txt"
  *
  * 简化说明：
- *   - 不处理符号链接（Phase 7 无 symlink 支持）
- *   - 不检查权限（Phase 7 无用户 ID 支持）
- *   - 只处理绝对路径（从根目录开始）
- *   - 不支持 ".." 和 "."（Phase 7 简化）— 实际支持 "."
+ *   - 不处理符号链接
+ *   - 不检查权限
+ *   - 只处理绝对路径
  */
 
 #include <linux/types.h>
@@ -35,6 +32,7 @@ void boot_printk_hex(unsigned long val);
 
 /* 全局根挂载点 */
 extern struct vfsmount *root_mnt;
+extern struct mount_entry mount_table[MAX_MOUNTS];
 
 /*
  * ============================================================
@@ -145,10 +143,101 @@ static struct dentry *walk_component(struct dentry *parent,
 
 /*
  * ============================================================
+ * 内部辅助：字符串前缀比较
+ * ============================================================
+ */
+static int path_starts_with(const char *path, const char *prefix, int prefix_len)
+{
+    int i;
+    for (i = 0; i < prefix_len; i++) {
+        if (path[i] != prefix[i])
+            return 0;
+    }
+    return 1;
+}
+
+/*
+ * ============================================================
+ * resolve_mount_point - 解析挂载点
+ *
+ * 检查路径是否匹配某个非根挂载点。如果匹配，返回该挂载点的
+ * root dentry 和路径剩余部分。
+ *
+ * @pathname:   完整路径
+ * @dentry_out: 输出起始 dentry
+ * @rest_out:   输出路径剩余部分（跳过挂载前缀后）
+ *
+ * 返回 1 表示匹配了非根挂载点，0 表示使用根文件系统。
+ * ============================================================
+ */
+static int resolve_mount_point(const char *pathname,
+                                struct dentry **dentry_out,
+                                const char **rest_out)
+{
+    struct mount_entry *best = NULL;
+    int best_len = 0;
+    int plen;
+    int i;
+
+    /* 计算路径长度 */
+    plen = 0;
+    while (pathname[plen])
+        plen++;
+
+    /* 查找最长前缀匹配的挂载点 */
+    for (i = 0; i < MAX_MOUNTS; i++) {
+        int mlen;
+
+        if (!mount_table[i].used)
+            continue;
+
+        mlen = mount_table[i].mnt_pathlen;
+
+        /* 跳过根挂载 */
+        if (mlen == 1 && mount_table[i].mnt_path[0] == '/')
+            continue;
+
+        /* 路径长度检查 */
+        if (plen < mlen)
+            continue;
+
+        /* 前缀匹配 */
+        if (!path_starts_with(pathname, mount_table[i].mnt_path, mlen))
+            continue;
+
+        /* 挂载路径后必须是 '/' 或 '\0' */
+        if (plen > mlen && pathname[mlen] != '/')
+            continue;
+
+        /* 选择最长匹配 */
+        if (mlen > best_len) {
+            best = &mount_table[i];
+            best_len = mlen;
+        }
+    }
+
+    if (best) {
+        *dentry_out = best->mnt.mnt_root;
+        /* 计算剩余路径 */
+        if (pathname[best_len] == '/')
+            *rest_out = skip_slashes(pathname + best_len);
+        else
+            *rest_out = pathname + best_len; /* '\0' */
+        return 1;
+    }
+
+    return 0;
+}
+
+/*
+ * ============================================================
  * path_lookup - 解析完整路径名为 dentry
  *
  * 将路径名（如 "/etc/passwd"）解析为对应的 dentry。
- * 逐级解析路径分量，每一级先查 dcache，miss 则调用文件系统 lookup。
+ *
+ * Phase 8 增强：
+ *   先检查挂载表，如果路径匹配非根挂载点（如 "/sq"），
+ *   则从该挂载点的 root dentry 开始解析剩余路径。
  *
  * @pathname: 路径名（必须是绝对路径）
  *
@@ -170,8 +259,30 @@ struct dentry *path_lookup(const char *pathname)
 
     /* 绝对路径从根 dentry 开始 */
     if (*pathname != '/')
-        return NULL;    /* Phase 7 不支持相对路径 */
+        return NULL;    /* 不支持相对路径 */
 
+    /*
+     * Phase 8：检查挂载表
+     * 如果路径匹配非根挂载点，从该挂载点的 dentry 树开始
+     */
+    {
+        struct dentry *mnt_root;
+        const char *rest;
+
+        if (resolve_mount_point(pathname, &mnt_root, &rest)) {
+            dentry = mnt_root;
+            path = rest;
+
+            /* 如果剩余路径为空，直接返回挂载点根 */
+            if (*path == '\0')
+                return dget(dentry);
+
+            /* 从挂载点根开始解析剩余路径 */
+            goto resolve_rest;
+        }
+    }
+
+    /* 使用根文件系统 */
     dentry = root_mnt->mnt_root;
 
     /* 跳过开头的 '/' */
@@ -181,6 +292,7 @@ struct dentry *path_lookup(const char *pathname)
     if (*path == '\0')
         return dget(dentry);
 
+resolve_rest:
     /* 逐级解析路径分量 */
     while (*path) {
         struct dentry *next;
@@ -206,6 +318,8 @@ struct dentry *path_lookup(const char *pathname)
  *
  * 解析路径的父目录部分，返回父 dentry 和最后一个路径分量。
  * 用于 open(O_CREAT)：先找到父目录，再在其中创建新文件。
+ *
+ * Phase 8 增强：支持在非根挂载点中创建文件。
  *
  * @pathname:    完整路径名
  * @parent_out:  输出父目录 dentry
@@ -235,12 +349,31 @@ struct dentry *path_lookup_create(const char *pathname,
     if (*pathname != '/')
         return NULL;
 
+    /*
+     * Phase 8：检查挂载表
+     */
+    {
+        struct dentry *mnt_root;
+        const char *rest;
+
+        if (resolve_mount_point(pathname, &mnt_root, &rest)) {
+            parent = mnt_root;
+            path = rest;
+
+            if (*path == '\0')
+                return NULL; /* 不能在挂载根上创建 */
+
+            goto resolve_create;
+        }
+    }
+
     parent = root_mnt->mnt_root;
     path = skip_slashes(pathname);
 
     if (*path == '\0')
         return NULL;    /* "/" — 不能创建根 */
 
+resolve_create:
     /*
      * 逐级解析路径，直到最后一个分量。
      * 最后一个分量是要创建的文件名，其之前的部分是父目录路径。

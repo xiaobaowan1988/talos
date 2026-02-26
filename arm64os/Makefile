@@ -64,12 +64,16 @@ LDFLAGS := \
 # ---- 文件列表 ----
 LDSCRIPT := scripts/linker.ld
 
-# Phase 1 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
+# 目标文件（顺序重要：head.o 必须第一个，确保 Image 头在 0x40080000）
 OBJS := \
     arch/arm64/kernel/head.o \
     arch/arm64/kernel/entry.o \
+    arch/arm64/mm/tlb.o \
+    arch/arm64/mm/mmu.o \
     kernel/printk.o \
-    kernel/main.o
+    kernel/main.o \
+    mm/memblock.o \
+    mm/page_alloc.o
 
 TARGET  := arm64os.elf
 BINARY  := arm64os.bin          # 纯二进制格式（可选）
@@ -93,8 +97,17 @@ $(TARGET): $(OBJS) $(LDSCRIPT)
 arch/arm64/kernel/%.o: arch/arm64/kernel/%.S
 	$(CC) $(ASFLAGS) -x assembler-with-cpp -c -o $@ $<
 
+arch/arm64/mm/%.o: arch/arm64/mm/%.S
+	$(CC) $(ASFLAGS) -x assembler-with-cpp -c -o $@ $<
+
 # ---- 编译 C 文件 ----
 kernel/%.o: kernel/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+arch/arm64/mm/%.o: arch/arm64/mm/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+mm/%.o: mm/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ---- 可选：生成纯二进制（用于 -kernel 加载时若需要 Image 格式）----
@@ -163,7 +176,7 @@ clean:
 # ---- 帮助 ----
 .PHONY: help
 help:
-	@echo "arm64os Phase 1 Build System"
+	@echo "arm64os Phase 1+2 Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       — Build arm64os.elf (default)"

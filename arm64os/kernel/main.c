@@ -2,15 +2,12 @@
 /*
  * arm64os/kernel/main.c
  *
- * 内核主入口及 Phase 1 异常处理桩函数
+ * 内核主入口及异常处理桩函数
  *
  * 参考：init/main.c, arch/arm64/kernel/setup.c
  *
- * Phase 1 实现：
- *   - start_kernel()：打印启动信息，验证异常向量表已安装
- *   - handle_sync_exception()：同步异常处理桩（打印寄存器信息）
- *   - handle_irq()：IRQ 处理桩
- *   - panic_unhandled()：不可恢复异常处理
+ * Phase 1: boot + exception vectors
+ * Phase 2: MMU + buddy allocator
  */
 
 #include <linux/types.h>
@@ -30,6 +27,14 @@ extern char _bss_end[];
  * boot_args[0] = FDT 物理地址（x0）
  */
 extern unsigned long boot_args[4];
+
+/* Phase 2: MMU and memory management */
+extern void create_page_tables(void);
+extern void enable_mmu(void);
+extern void memblock_init(void);
+extern void memblock_dump_stats(void);
+extern void buddy_init(void);
+extern void test_buddy(void);
 
 /*
  * pt_regs - 异常发生时的寄存器快照（由 entry.S kernel_entry 宏构建）
@@ -219,10 +224,29 @@ void start_kernel(void)
     }
 
     boot_printk("[BOOT] Exception vectors installed\n");
-    boot_printk("[BOOT] start_kernel() reached\n");
-    boot_printk("[BOOT] Phase 1 complete — halting (Phase 2 will add scheduler)\n");
+    boot_printk("[BOOT] Phase 1 complete\n");
 
-    /* Phase 1 终态：无调度器，无用户态进程，挂死等待 Phase 2 */
+    /* ---- Phase 2: MMU + Memory Management ---- */
+    boot_printk("\n[BOOT] Phase 2: MMU + Buddy Allocator\n");
+
+    /* Step 1: Initialize early memory allocator */
+    memblock_init();
+
+    /* Step 2: Build identity-mapped page tables */
+    create_page_tables();
+
+    /* Step 3: Enable MMU with identity mapping */
+    enable_mmu();
+
+    /* Step 4: Initialize buddy allocator */
+    buddy_init();
+    memblock_dump_stats();
+
+    /* Step 5: Test buddy allocator */
+    test_buddy();
+
+    boot_printk("\n[BOOT] Phase 2 complete — halting\n");
+
     while (1)
         ;
 }

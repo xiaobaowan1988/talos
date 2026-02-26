@@ -1,0 +1,260 @@
+/* ===== ARM64 OS Guide — epub stylesheet ===== */
+
+/* ---------- page & body ---------- */
+@page {
+  margin: 1.2cm;
+}
+body {
+  font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC",
+               "Hiragino Mincho ProN", Georgia, serif;
+  font-size: 1em;
+  line-height: 1.8;
+  color: #1a1a1a;
+  background-color: #fdfdfd;
+  text-align: justify;
+  hyphens: none;
+  -webkit-hyphens: none;
+}
+
+/* ---------- headings ---------- */
+h1 {
+  font-size: 1.8em;
+  font-weight: 700;
+  margin: 2.5em 0 0.6em 0;
+  padding-bottom: 0.3em;
+  border-bottom: 2px solid #2c3e50;
+  color: #2c3e50;
+  page-break-before: always;
+  line-height: 1.4;
+}
+h2 {
+  font-size: 1.4em;
+  font-weight: 700;
+  margin: 1.8em 0 0.5em 0;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid #bdc3c7;
+  color: #2c3e50;
+  line-height: 1.4;
+}
+h3 {
+  font-size: 1.2em;
+  font-weight: 700;
+  margin: 1.4em 0 0.4em 0;
+  color: #34495e;
+}
+h4 {
+  font-size: 1.05em;
+  font-weight: 700;
+  margin: 1.2em 0 0.3em 0;
+  color: #34495e;
+}
+h5, h6 {
+  font-size: 1em;
+  font-weight: 700;
+  margin: 1em 0 0.3em 0;
+  color: #555;
+}
+h1, h2, h3, h4, h5, h6 {
+  page-break-after: avoid;
+  page-break-inside: avoid;
+}
+
+/* title page */
+h1.title {
+  font-size: 2.2em;
+  text-align: center;
+  border-bottom: none;
+  margin-top: 3em;
+  color: #1a252f;
+}
+p.author, p.date {
+  text-align: center;
+  font-size: 1.1em;
+  color: #666;
+}
+
+/* ---------- paragraphs & links ---------- */
+p {
+  margin: 0.8em 0;
+  text-indent: 0;
+  widows: 2;
+  orphans: 2;
+}
+a {
+  color: #2980b9;
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---------- lists ---------- */
+ol, ul {
+  margin: 0.6em 0 0.6em 1.6em;
+  padding: 0;
+}
+li {
+  margin: 0.25em 0;
+}
+li > ol, li > ul {
+  margin-top: 0.15em;
+  margin-bottom: 0.15em;
+}
+
+/* ---------- code ---------- */
+code {
+  font-family: "Fira Code", "Source Code Pro", "JetBrains Mono",
+               Menlo, Monaco, Consolas, "Courier New", monospace;
+  font-size: 0.85em;
+  background-color: #f0f0f0;
+  padding: 0.15em 0.35em;
+  border-radius: 3px;
+  hyphens: manual;
+  -webkit-hyphens: manual;
+}
+pre {
+  margin: 1em 0;
+  padding: 0.8em 1em;
+  background-color: #f5f5f5;
+  border: 1px solid #ddd;
+  border-left: 4px solid #2980b9;
+  border-radius: 4px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.82em;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.sourceCode {
+  background-color: transparent;
+  overflow: visible;
+}
+@media screen {
+  .sourceCode {
+    overflow: visible !important;
+    white-space: pre-wrap !important;
+  }
+}
+
+/* ---------- tables ---------- */
+table {
+  margin: 1.2em 0;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9em;
+  line-height: 1.5;
+  page-break-inside: avoid;
+}
+table caption {
+  margin-bottom: 0.5em;
+  font-weight: 700;
+  color: #2c3e50;
+}
+thead {
+  background-color: #2c3e50;
+  color: #fff;
+}
+th {
+  padding: 0.5em 0.6em;
+  text-align: left;
+  font-weight: 700;
+  border: 1px solid #2c3e50;
+}
+td {
+  padding: 0.45em 0.6em;
+  border: 1px solid #ddd;
+}
+tbody tr:nth-child(even) {
+  background-color: #f7f9fa;
+}
+tbody tr:hover {
+  background-color: #eef2f5;
+}
+
+/* ---------- blockquote ---------- */
+blockquote {
+  margin: 1em 0;
+  padding: 0.6em 1em;
+  border-left: 4px solid #3498db;
+  background-color: #f0f7fd;
+  color: #34495e;
+}
+blockquote p {
+  margin: 0.4em 0;
+}
+
+/* ---------- horizontal rule ---------- */
+hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(to right, transparent, #bdc3c7, transparent);
+  margin: 2em 0;
+}
+
+/* ---------- TOC ---------- */
+nav#toc {
+  page-break-before: always;
+}
+nav#toc h2, #TOC h2 {
+  border-bottom: 2px solid #2c3e50;
+}
+#TOC li {
+  list-style: none;
+  margin: 0.3em 0;
+}
+#TOC ul {
+  padding-left: 1.3em;
+}
+#TOC > ul {
+  padding-left: 0;
+}
+#TOC a {
+  text-decoration: none;
+  color: #2c3e50;
+}
+nav#toc ol, nav#landmarks ol {
+  padding: 0;
+  margin-left: 1em;
+}
+nav#toc ol li, nav#landmarks ol li {
+  list-style-type: none;
+  margin: 0.3em 0;
+}
+
+/* ---------- misc ---------- */
+img {
+  max-width: 100%;
+  height: auto;
+}
+header {
+  margin-bottom: 4em;
+  text-align: center;
+}
+span.smallcaps {
+  font-variant: small-caps;
+}
+div.column {
+  display: inline-block;
+  vertical-align: top;
+  width: 50%;
+}
+div.hanging-indent {
+  margin-left: 1.5em;
+  text-indent: -1.5em;
+}
+ul.task-list {
+  list-style: none;
+}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1.6em;
+  vertical-align: middle;
+}
+a.footnote-ref {
+  vertical-align: super;
+}

@@ -1,0 +1,8 @@
+---
+title: "ARM64 操作系统内核：从零开始逐行推导"
+subtitle: "12 个阶段，从裸机启动到安全容器运行时"
+author: "arm64os 项目"
+lang: zh-CN
+toc-title: "目录"
+rights: "All rights reserved"
+---

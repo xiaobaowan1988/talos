@@ -1,9 +1,0 @@
----
-cluster:
-  apiServer:
-    admissionControl:
-      - name: PodSecurity
-        configuration:
-          exemptions:
-            namespaces:
-              - longhorn-system

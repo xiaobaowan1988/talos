@@ -1,4 +1,0 @@
-machine:
-  network:
-    hostname:
-      $patch: delete

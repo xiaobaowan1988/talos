@@ -1,6 +1,0 @@
-apiVersion: v1alpha1
-kind: VolumeConfig
-name: EPHEMERAL
-provisioning:
-    minSize: 10GiB
-    maxSize: 2.5TiB
